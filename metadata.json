@@ -1,0 +1,8 @@
+{
+  "name": "Remix Editor CSG 3d full 4",
+  "description": "Herramienta de modelado 3D y animación basada en CSG. Diseña modelos complejos a partir de formas simples, usa imágenes de referencia y exporta en STL, GLTF o GLB.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

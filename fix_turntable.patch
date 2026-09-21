@@ -1,0 +1,13 @@
+--- src/components/MaterialStudioViewport.tsx
++++ src/components/MaterialStudioViewport.tsx
+@@ -441,9 +441,6 @@
+ 
+       const delta = refs.clock.getDelta();
+       const elapsedTime = refs.clock.getElapsedTime();
+ 
+-      // Turntable rotation
+-      if (isTurntableActive && refs.previewGroup) {
+-        refs.previewGroup.rotation.y += delta * turntableSpeed;
+-      }
+-
+       // Volumetric Shader updates
