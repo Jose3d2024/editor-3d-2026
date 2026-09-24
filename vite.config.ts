@@ -58,5 +58,15 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       hmr: process.env.DISABLE_HMR !== 'true',
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            three: ['three'],
+            vendor: ['react', 'react-dom', 'zustand', 'clsx', 'tailwind-merge'],
+          },
+        },
+      },
+    },
   };
 });

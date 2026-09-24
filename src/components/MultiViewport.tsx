@@ -68,14 +68,12 @@ const PRESET_SLOTS: Record<ViewportLayoutPreset, SlotConfig[]> = {
 };
 
 export const MultiViewport: React.FC = () => {
-  const {
-    maximizedViewport,
-    activeViewport,
-    viewportConfig,
-    setViewportSplits,
-    setCustomResizeMode,
-    resetViewportSplits,
-  } = useStore();
+  const maximizedViewport = useStore(state => state.maximizedViewport);
+  const activeViewport = useStore(state => state.activeViewport);
+  const viewportConfig = useStore(state => state.viewportConfig);
+  const setViewportSplits = useStore(state => state.setViewportSplits);
+  const setCustomResizeMode = useStore(state => state.setCustomResizeMode);
+  const resetViewportSplits = useStore(state => state.resetViewportSplits);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingX = useRef(false);

@@ -315,7 +315,7 @@ const getAdaptiveHandleScale = (
   return 0.012;
 };
 
-export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: initialTitle }) => {
+export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType, title: initialTitle }) => {
   const [type, setType] = React.useState<ViewportType | 'CAMERA'>(initialType);
   const [title, setTitle] = React.useState(initialTitle);
   const [viewCameraId, setViewCameraId] = React.useState<string | null>(null);
@@ -545,8 +545,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const projectRef = useRef(project);
   useEffect(() => { projectRef.current = project; }, [project]);
   useEffect(() => { siluetaRef.current = silueta; }, [silueta]);
-
-  const textureCacheRef = useRef<Map<string, THREE.Texture>>(new Map());
 
   // ── Helpers ──────────────────────────────────────────────────────────────
   const getPoint = (e: PointerEvent | MouseEvent, skipSnap = false) => {
@@ -3560,8 +3558,23 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       pickMesh.userData.vertexMap = vertexMap;
       primitivesGroup.add(pickMesh);
     });
+    const handleDirectDispose = (e: Event) => {
+      const customEvt = e as CustomEvent<{ id?: string; ids?: string[] }>;
+      const targetIds = customEvt.detail?.ids || (customEvt.detail?.id ? [customEvt.detail.id] : []);
+      targetIds.forEach(id => {
+        const mesh = meshesRef.current.get(id);
+        if (mesh) {
+          disposeDeepObject(mesh);
+          mesh.removeFromParent();
+          meshesRef.current.delete(id);
+        }
+      });
+    };
+    window.addEventListener('csg-dispose-object', handleDirectDispose);
+
     return () => {
       isEffectCancelled = true;
+      window.removeEventListener('csg-dispose-object', handleDirectDispose);
       group.children.forEach(disposeDeepObject);
       primitivesGroup.children.forEach(disposeDeepObject);
 
@@ -8163,4 +8176,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       <canvas ref={gizmoCanvasRef} className="absolute inset-0 w-full h-full" style={{zIndex:20,pointerEvents:'none'}} width={600} height={400}/>
     </div>
   );
-};
+});
+
+Viewport.displayName = 'Viewport';

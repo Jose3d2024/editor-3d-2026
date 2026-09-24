@@ -1746,6 +1746,9 @@ export const useStore = create<Store>()((set, get) => ({
 
   // ── Remove / Duplicate ────────────────────────────────────────────────────
   removeObject: (id) => {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('csg-dispose-object', { detail: { id } }));
+    }
     const { project, selectedObjectId, selectedObjectIds } = get();
     const safeIds = selectedObjectIds || [];
     const newIds = safeIds.filter(i => i !== id);
@@ -1756,6 +1759,9 @@ export const useStore = create<Store>()((set, get) => ({
 
   removeObjects: (ids) => {
     if (!ids || ids.length === 0) return;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('csg-dispose-object', { detail: { ids } }));
+    }
     const { project, selectedObjectId, selectedObjectIds } = get();
     const idSet = new Set(ids);
     const safeIds = selectedObjectIds || [];
