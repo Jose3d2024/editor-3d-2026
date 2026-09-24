@@ -320,6 +320,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const [title, setTitle] = React.useState(initialTitle);
   const [viewCameraId, setViewCameraId] = React.useState<string | null>(null);
   const [showViewDropdown, setShowViewDropdown] = React.useState(false);
+  const [isContextLost, setIsContextLost] = React.useState(false);
+  const isContextLostRef = useRef(false);
 
   // Sync with prop if it changes (e.g. from MultiViewport)
   useEffect(() => {
@@ -1236,10 +1238,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
     const handleContextLost = (event: Event) => {
       event.preventDefault();
+      isContextLostRef.current = true;
+      setIsContextLost(true);
       console.warn('[Viewport] WebGL Context Lost event prevented.');
     };
     const handleContextRestored = () => {
+      isContextLostRef.current = false;
+      setIsContextLost(false);
       console.info('[Viewport] WebGL Context Restored.');
+      if (rendererRef.current && sceneRef.current && cameraRef.current) {
+        rendererRef.current.render(sceneRef.current, cameraRef.current);
+      }
     };
     const canvas = renderer.domElement;
     canvas.addEventListener('webglcontextlost', handleContextLost, false);
@@ -1618,6 +1627,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     const clock = new THREE.Clock();
     const animate = () => {
       id = requestAnimationFrame(animate);
+      if (isContextLostRef.current) return;
       try {
         // LEER SIEMPRE LAS INSTANCIAS ACTUALES DESDE LAS REFERENCIAS MUTABLES
         const currentRenderer = rendererRef.current;
@@ -2067,6 +2077,40 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     const group = groupRef.current;
     const primitivesGroup = primitivesGroupRef.current;
     if (!group || !primitivesGroup) return;
+    // Deep dispose helper to guarantee all GPU resources and textures are released
+    const disposeDeepObject = (obj: THREE.Object3D) => {
+      if ((obj as THREE.Mesh).isMesh || (obj as THREE.Line).isLine || (obj as THREE.Points).isPoints) {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) {
+          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          materials.forEach(mat => {
+            const m = mat as any;
+            const texKeys = [
+              'map', 'alphaMap', 'aoMap', 'bumpMap', 'displacementMap',
+              'emissiveMap', 'envMap', 'lightMap', 'metalnessMap',
+              'normalMap', 'roughnessMap', 'specularMap', 'clearcoatMap',
+              'clearcoatRoughnessMap', 'clearcoatNormalMap', 'sheenColorMap',
+              'sheenRoughnessMap', 'transmissionMap', 'thicknessMap',
+              'iridescenceMap', 'iridescenceThicknessMap', 'anisotropyMap',
+            ];
+            texKeys.forEach(k => {
+              if (m[k] && typeof m[k].dispose === 'function') m[k].dispose();
+            });
+            Object.keys(m).forEach(k => {
+              if (m[k] && m[k].isTexture && typeof m[k].dispose === 'function') m[k].dispose();
+            });
+            mat.dispose();
+          });
+        }
+      }
+      if (obj.children && obj.children.length > 0) {
+        obj.children.forEach(disposeDeepObject);
+      }
+    };
+
+    group.children.forEach(disposeDeepObject);
+    primitivesGroup.children.forEach(disposeDeepObject);
     group.clear();
     primitivesGroup.clear();
     meshesRef.current.clear();
@@ -3518,27 +3562,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     });
     return () => {
       isEffectCancelled = true;
-      // Dispose of materials and textures to prevent memory leaks
-      const disposeObject = (obj: THREE.Object3D) => {
-        if ((obj as THREE.Mesh).isMesh) {
-          const mesh = obj as THREE.Mesh;
-          if (mesh.geometry) mesh.geometry.dispose();
-          if (mesh.material) {
-            const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-            materials.forEach(mat => {
-              mat.dispose();
-              // Dispose of textures too
-              Object.keys(mat).forEach(key => {
-                const val = (mat as any)[key];
-                if (val && val.isTexture) val.dispose();
-              });
-            });
-          }
-        }
-        obj.children.forEach(disposeObject);
-      };
-      group.children.forEach(disposeObject);
-      primitivesGroup.children.forEach(disposeObject);
+      group.children.forEach(disposeDeepObject);
+      primitivesGroup.children.forEach(disposeDeepObject);
 
       // Clean up deleted particle simulators
       const currentObjectIds = new Set(project.objects.map(o => o.id));
@@ -8109,6 +8134,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             const pos = _interp?.position || [0, 0, 0];
             return `X:${safeFixed(pos[0], 2)} Y:${safeFixed(pos[1], 2)} Z:${safeFixed(pos[2], 2)}${obj.keyframes?.length ? ` [${obj.keyframes.length}kf]` : ''}`;
           })()}
+        </div>
+      )}
+
+      {/* WebGL Context Lost Recovery Overlay */}
+      {isContextLost && (
+        <div className="absolute inset-0 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center z-50 text-white p-4 select-none">
+          <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mb-3" />
+          <p className="text-xs font-bold text-amber-300 uppercase tracking-wider">Contexto WebGL Suspendido</p>
+          <p className="text-[11px] text-zinc-400 mt-1.5 text-center max-w-xs leading-relaxed">
+            El navegador pausó temporalmente los recursos gráficos de la GPU. Esperando reactivación automática...
+          </p>
         </div>
       )}
 
