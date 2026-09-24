@@ -1,6 +1,6 @@
 import React from 'react';
 import { useStore } from '../store/useStore';
-import { Layers, Loader2, Sparkles, Box, Cpu, CheckCircle2, TrendingDown } from 'lucide-react';
+import { Layers, Loader2, Sparkles, Box, Cpu, CheckCircle2, TrendingDown, X } from 'lucide-react';
 import { safeFixed } from '../utils/numberUtils';
 
 export const MeshProgressModal: React.FC = () => {
@@ -65,9 +65,19 @@ export const MeshProgressModal: React.FC = () => {
             </div>
           </div>
 
-          <span className={`text-lg font-extrabold font-mono px-3 py-1 rounded-lg border ${completed ? 'bg-emerald-950/80 text-emerald-400 border-emerald-700/50' : 'bg-indigo-950/50 text-indigo-400 border-indigo-800/40'}`}>
-            {clampedProgress}%
-          </span>
+          <div className="flex items-center gap-2">
+            <span className={`text-lg font-extrabold font-mono px-3 py-1 rounded-lg border ${completed ? 'bg-emerald-950/80 text-emerald-400 border-emerald-700/50' : 'bg-indigo-950/50 text-indigo-400 border-indigo-800/40'}`}>
+              {clampedProgress}%
+            </span>
+            <button
+              type="button"
+              onClick={closeMeshProcessing}
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
+              title="Cerrar ventana"
+            >
+              <X size={16} />
+            </button>
+          </div>
         </div>
 
         {/* Subtitle / Status text */}

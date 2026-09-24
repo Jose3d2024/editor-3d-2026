@@ -8165,7 +8165,7 @@ export const PropertiesPanel: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 h-full overflow-hidden flex flex-col">
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
         {activeTab === 'HISTORIAL' ? (
           <HistoryPanel />
         ) : activeTab === 'EDIT_MESH' ? (

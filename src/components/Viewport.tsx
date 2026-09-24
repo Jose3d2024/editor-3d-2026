@@ -7305,10 +7305,34 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           useStore.getState().weldSelectedVertices(selectedObjectId, selectedVertexIndices, 0.05);
           return;
         }
+        // Select Linked Island (L key)
+        if ((event.key === 'l' || event.key === 'L') && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          useStore.getState().selectLinkedAction(selectedObjectId);
+          return;
+        }
+        // Invert Selection (Ctrl+I or Cmd+I)
+        if ((event.key === 'i' || event.key === 'I') && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          useStore.getState().invertSelectionAction();
+          return;
+        }
       }
 
       // ── FACE MODE OPERATIONS ──
       if (editMode === 'FACE' && selectedObjectId) {
+        // Select Linked Island (L key)
+        if ((event.key === 'l' || event.key === 'L') && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          useStore.getState().selectLinkedAction(selectedObjectId);
+          return;
+        }
+        // Invert Selection (Ctrl+I or Cmd+I)
+        if ((event.key === 'i' || event.key === 'I') && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          useStore.getState().invertSelectionAction();
+          return;
+        }
         // Delete Faces (Delete / Backspace)
         if (event.key === 'Delete' || event.key === 'Backspace') {
           if (selectedFaceIndices.length > 0) {

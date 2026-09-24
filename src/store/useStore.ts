@@ -47,6 +47,7 @@ import {
 } from '../utils/nurbs';
 import type { NurbsKnotType } from '../utils/nurbs';
 import { snapPointToSurfaces, alignObjectRotationToNormal, getObjectBaseExtentAlongNormal } from '../utils/faceSnap';
+import { getLinkedSelection } from '../utils/meshCleanUp';
 
 const DEFAULT_CUBE_GEOM = generatePrimitive('CUBE', { segments: 1 });
 
@@ -434,6 +435,10 @@ interface Store extends AppState {
   deleteLooseGeometry: (id: string) => Promise<{ success: boolean; message: string }>;
   dissolveDegenerateGeometry: (id: string, minArea?: number) => Promise<{ success: boolean; message: string }>;
   mergeVerticesByDistanceAction: (id: string, distance?: number) => Promise<{ success: boolean; message: string }>;
+  purgeMeshIslandsAction: (id: string, options?: { keepOnlyLargest?: boolean; minFacesThreshold?: number }) => Promise<{ success: boolean; message: string }>;
+  purgeDebrisPolygonsAction: (id: string, minArea?: number) => Promise<{ success: boolean; message: string }>;
+  selectLinkedAction: (id?: string) => { success: boolean; message: string };
+  invertSelectionAction: () => { success: boolean; message: string };
   subdivideSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
   insertVertexOnEdge: (id: string, edgeIndices?: number[], point?: V3) => { success: boolean; message: string };
   bridgeSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
@@ -5232,11 +5237,25 @@ export const useStore = create<Store>()((set, get) => ({
   // ── Face & Edge Tools ──────────────────────────────────────────────────────
   deleteSelectedFaces: (id: string, faceIndices?: number[]) => {
     const { project, selectedFaceIndices } = get();
-    const obj = project.objects.find(o => o.id === id);
-    if (!obj || !obj.faces) return { success: false, message: 'Objeto sin caras.' };
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    if (!obj.faces || obj.faces.length === 0) {
+      if (obj.meshData) {
+        return { success: false, message: 'Pulsa "Extraer Vértices" en la parte superior para editar caras de este modelo importado.' };
+      }
+      try {
+        const geo = createBaseGeometry(obj);
+        const { fromThreeGeometry } = require('../utils/modifiers');
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      } catch {
+        return { success: false, message: 'Objeto sin caras editables.' };
+      }
+    }
 
     const toDelete = faceIndices && faceIndices.length > 0 ? faceIndices : selectedFaceIndices;
-    if (!toDelete || toDelete.length === 0) return { success: false, message: 'No hay caras seleccionadas.' };
+    if (!toDelete || toDelete.length === 0) return { success: false, message: 'No hay caras seleccionadas para eliminar.' };
 
     const toRemove = new Set(toDelete);
     const newFaces = obj.faces.filter((_, i) => !toRemove.has(i));
@@ -5256,11 +5275,13 @@ export const useStore = create<Store>()((set, get) => ({
       });
 
       get().updateObject(id, {
+        meshData: undefined,
         vertices: bakedVerts,
         faces: [],
         wireframeEdges: edges,
         isWireframeOnly: true,
         vertexOffsets: {},
+        stats: { vertices: bakedVerts.length, faces: 0 }
       });
       set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
       get().saveHistory();
@@ -5286,13 +5307,15 @@ export const useStore = create<Store>()((set, get) => ({
     }));
 
     get().updateObject(id, {
+      meshData: undefined,
       vertices: newVerts,
       faces: remappedFaces,
       vertexOffsets: {},
+      stats: { vertices: newVerts.length, faces: remappedFaces.length }
     });
     set({ selectedFaceIndices: [], selectedVertexIndices: [] });
     get().saveHistory();
-    return { success: true, message: `${toRemove.size} cara(s) eliminada(s).` };
+    return { success: true, message: `${toRemove.size} cara(s) eliminada(s). Topología actualizada.` };
   },
 
   removeAllFaces: (id: string) => {
@@ -6047,6 +6070,219 @@ export const useStore = create<Store>()((set, get) => ({
       set({ meshProcessing: null });
       return { success: false, message: `Error al fusionar: ${err?.message || err}` };
     }
+  },
+
+  purgeMeshIslandsAction: async (id: string, options = { keepOnlyLargest: true }) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const initialVerts = (obj.vertices && obj.vertices.length > 0)
+      ? obj.vertices.length
+      : (obj.stats?.vertices || (obj.meshData as any)?.verticesCount || 0);
+    const initialFaces = (obj.faces && obj.faces.length > 0)
+      ? obj.faces.length
+      : (obj.stats?.faces || (obj.meshData as any)?.facesCount || 0);
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Purga de Fragmentos e Islas Flotantes',
+        subtitle: 'Analizando conectividad topológica y separando piezas...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) {
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      }
+      if (!obj.vertices || obj.vertices.length === 0 || !obj.faces || obj.faces.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const { createBaseGeometry } = await import('../utils/csg');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      }
+
+      if (!obj.vertices || !obj.faces || obj.faces.length === 0) {
+        set({ meshProcessing: null });
+        return { success: false, message: 'No se pudieron extraer caras del objeto.' };
+      }
+
+      const { purgeFloatingIslands } = await import('../utils/meshCleanUp');
+      const res = purgeFloatingIslands(obj.vertices, obj.faces, options, obj.vertexOffsets);
+
+      get().updateObject(id, {
+        meshData: undefined,
+        vertices: res.vertices,
+        faces: res.faces,
+        vertexOffsets: {},
+        stats: { vertices: res.vertices.length, faces: res.faces.length }
+      });
+      set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
+      get().saveHistory('Eliminar Islas Flotantes', 'edit');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: res.report.message,
+          completed: true,
+          vertCount: initialVerts,
+          faceCount: initialFaces,
+          finalVertCount: res.vertices.length,
+          finalFaceCount: res.faces.length,
+        } : null
+      }));
+
+      return { success: true, message: res.report.message };
+    } catch (err: any) {
+      set({ meshProcessing: null });
+      return { success: false, message: `Error al purgar islas: ${err?.message || err}` };
+    }
+  },
+
+  purgeDebrisPolygonsAction: async (id: string, minArea = 1e-6) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const initialVerts = (obj.vertices && obj.vertices.length > 0)
+      ? obj.vertices.length
+      : (obj.stats?.vertices || (obj.meshData as any)?.verticesCount || 0);
+    const initialFaces = (obj.faces && obj.faces.length > 0)
+      ? obj.faces.length
+      : (obj.stats?.faces || (obj.meshData as any)?.facesCount || 0);
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Poda Profunda de Polígonos Inservibles',
+        subtitle: 'Buscando caras degeneradas, duplicadas coplanares y astillas...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) {
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      }
+      if (!obj.vertices || obj.vertices.length === 0 || !obj.faces || obj.faces.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const { createBaseGeometry } = await import('../utils/csg');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      }
+
+      if (!obj.vertices || !obj.faces || obj.faces.length === 0) {
+        set({ meshProcessing: null });
+        return { success: false, message: 'No se pudieron extraer caras del objeto.' };
+      }
+
+      const { purgeDebrisMesh } = await import('../utils/meshCleanUp');
+      const res = purgeDebrisMesh(obj.vertices, obj.faces, minArea, obj.vertexOffsets);
+
+      get().updateObject(id, {
+        meshData: undefined,
+        vertices: res.vertices,
+        faces: res.faces,
+        vertexOffsets: {},
+        stats: { vertices: res.vertices.length, faces: res.faces.length }
+      });
+      set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
+      get().saveHistory('Poda de Escombros', 'edit');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: res.report.message,
+          completed: true,
+          vertCount: initialVerts,
+          faceCount: initialFaces,
+          finalVertCount: res.vertices.length,
+          finalFaceCount: res.faces.length,
+        } : null
+      }));
+
+      return { success: true, message: res.report.message };
+    } catch (err: any) {
+      set({ meshProcessing: null });
+      return { success: false, message: `Error en poda: ${err?.message || err}` };
+    }
+  },
+
+  selectLinkedAction: (id?: string) => {
+    const { project, selectedObjectId, selectedFaceIndices, selectedVertexIndices } = get();
+    const targetId = id || selectedObjectId;
+    if (!targetId) return { success: false, message: 'Ningún objeto seleccionado.' };
+    const obj = project.objects.find(o => o.id === targetId);
+    if (!obj || !obj.faces || obj.faces.length === 0) {
+      return { success: false, message: 'El objeto no tiene caras poligonales editables.' };
+    }
+
+    const facesToSeed = selectedFaceIndices.length > 0 ? selectedFaceIndices : [0];
+    const res = getLinkedSelection(obj.vertices, obj.faces, facesToSeed, selectedVertexIndices);
+
+    if (res.linkedFaceIndices.length === 0) {
+      return { success: false, message: 'No se encontró ninguna cara vinculada.' };
+    }
+
+    set({
+      selectedFaceIndices: res.linkedFaceIndices,
+      selectedVertexIndices: res.linkedVertexIndices,
+      editMode: 'FACE'
+    });
+
+    return {
+      success: true,
+      message: `¡Isla completa seleccionada! (${res.linkedFaceIndices.length} caras, ${res.linkedVertexIndices.length} vértices). Pulsa Supr para eliminarla.`
+    };
+  },
+
+  invertSelectionAction: () => {
+    const { project, selectedObjectId, selectedFaceIndices, selectedVertexIndices, editMode } = get();
+    if (!selectedObjectId) return { success: false, message: 'Ningún objeto seleccionado.' };
+    const obj = project.objects.find(o => o.id === selectedObjectId);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    if (editMode === 'FACE' && obj.faces && obj.faces.length > 0) {
+      const curSet = new Set(selectedFaceIndices);
+      const invertedFaces: number[] = [];
+      const invertedVerts = new Set<number>();
+      for (let fi = 0; fi < obj.faces.length; fi++) {
+        if (!curSet.has(fi)) {
+          invertedFaces.push(fi);
+          obj.faces[fi].indices.forEach(vi => invertedVerts.add(vi));
+        }
+      }
+      set({
+        selectedFaceIndices: invertedFaces,
+        selectedVertexIndices: Array.from(invertedVerts)
+      });
+      return { success: true, message: `Selección invertida: ${invertedFaces.length} caras seleccionadas.` };
+    } else if (editMode === 'VERTEX' && obj.vertices && obj.vertices.length > 0) {
+      const curSet = new Set(selectedVertexIndices);
+      const invertedVerts: number[] = [];
+      for (let vi = 0; vi < obj.vertices.length; vi++) {
+        if (!curSet.has(vi)) invertedVerts.push(vi);
+      }
+      set({ selectedVertexIndices: invertedVerts });
+      return { success: true, message: `Selección invertida: ${invertedVerts.length} vértices seleccionados.` };
+    }
+    return { success: false, message: 'Cambia a Modo Caras o Vértices para invertir la selección.' };
   },
 
   deleteSelectedEdges: (id: string, edgeIndices?: number[]) => {

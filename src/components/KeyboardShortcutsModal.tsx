@@ -138,6 +138,22 @@ export const SHORTCUTS_DATA: ShortcutItem[] = [
     detail: 'Une vértices coincidentes o seleccionados en un único punto común.',
   },
   {
+    id: 'mod-select-linked',
+    category: 'modeling',
+    keys: ['L'],
+    description: 'Seleccionar Isla Conectada (Select Linked)',
+    detail: 'Selecciona automáticamente todos los polígonos y vértices vinculados a la isla de la selección.',
+    badge: 'Pro',
+  },
+  {
+    id: 'mod-invert-selection',
+    category: 'modeling',
+    keys: ['Ctrl + I'],
+    description: 'Invertir Selección de Polígonos',
+    detail: 'Invierte las caras o vértices seleccionados para aislar o eliminar el resto de la figura.',
+    badge: 'Pro',
+  },
+  {
     id: 'mod-subdiv-segment',
     category: 'modeling',
     keys: ['D'],

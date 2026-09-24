@@ -32,7 +32,8 @@ import {
   Eraser,
   ShieldCheck,
   ChevronDown,
-  Loader2
+  Loader2,
+  Keyboard
 } from 'lucide-react';
 
 interface EditMeshPanelProps {
@@ -91,6 +92,10 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
     deleteLooseGeometry,
     dissolveDegenerateGeometry,
     mergeVerticesByDistanceAction,
+    purgeMeshIslandsAction,
+    purgeDebrisPolygonsAction,
+    selectLinkedAction,
+    invertSelectionAction,
     retopologizeObject,
     applyVoxelRemeshToObject,
     faceSnapConfig,
@@ -99,6 +104,11 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
   } = useStore();
 
   const obj = propObject || project.objects.find(o => o.id === selectedObjectId);
+
+  // Sub-Pestañas para evitar que los apartados salgan apilados uno encima de otro
+  type MeshSubTab = 'CLEANUP' | 'TOOLS' | 'MODIFIERS' | 'WIREFRAME' | 'SNAP' | 'SHORTCUTS';
+  const [activeSubTab, setActiveSubTab] = useState<MeshSubTab>('CLEANUP');
+  const [viewModeTab, setViewModeTab] = useState<'TABS' | 'ACCORDION'>('TABS');
 
   const [showWireframeModal, setShowWireframeModal] = useState(false);
   const [extrudeAmount, setExtrudeAmount] = useState(0.3);
@@ -119,14 +129,14 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
   const [isMerging, setIsMerging] = useState<boolean>(false);
   const [isProcessingModifier, setIsProcessingModifier] = useState<boolean>(false);
 
-  // Estados de apartados colapsables (minimizar secciones)
+  // Estados de apartados colapsables (modo acordeón)
   const [sectionsOpen, setSectionsOpen] = useState<Record<string, boolean>>({
     linesAndVertices: true,
     modeOperations: true,
     wireframe: false,
     modifiers: false,
     faceSnap: false,
-    cleanUp: false,
+    cleanUp: true,
     shortcuts: false,
   });
 
@@ -202,10 +212,10 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
   const isShape = obj.type === 'SHAPE';
 
   return (
-    <div className="flex-1 min-h-0 h-full flex flex-col overflow-y-auto overscroll-contain bg-zinc-950 text-zinc-200 divide-y divide-zinc-900 select-none pb-24 text-[11px] touch-pan-y">
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-zinc-950 text-zinc-200 select-none text-[11px]">
       
-      {/* ── Header: Resumen del Objeto y Modo ── */}
-      <div className="p-3 bg-zinc-900/40 space-y-2">
+      {/* ── Header Fijo: Resumen del Objeto, Estadísticas y Selector de Modo ── */}
+      <div className="p-2.5 bg-zinc-900/60 border-b border-white/5 space-y-2 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -334,38 +344,144 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
         </div>
       </div>
 
-      {/* Barra de Plegado / Desplegado Rápido */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900/70 border-y border-white/5 text-[9.5px]">
-        <span className="text-zinc-400 font-semibold tracking-wide uppercase text-[9px]">Apartados de Malla</span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setAllSections(false)}
-            className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-white/5 transition-colors cursor-pointer text-[9px]"
-            title="Plegar todos los apartados para ver la lista completa"
-          >
-            Plegar Todo
-          </button>
-          <button
-            type="button"
-            onClick={() => setAllSections(true)}
-            className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-white/5 transition-colors cursor-pointer text-[9px]"
-            title="Desplegar todos los apartados"
-          >
-            Desplegar Todo
-          </button>
+      {/* ── Sub-Pestañas de Malla (Para evitar solapamientos y separar apartados) ── */}
+      <div className="px-2.5 py-1.5 bg-zinc-900/90 border-b border-white/5 shrink-0">
+        <div className="flex items-center justify-between gap-1 mb-1.5 text-[9px] text-zinc-400">
+          <span className="font-bold uppercase tracking-wider text-emerald-400">Apartados de Malla</span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setViewModeTab(m => m === 'TABS' ? 'ACCORDION' : 'TABS')}
+              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[8.5px] border border-white/5 transition-colors cursor-pointer font-medium"
+              title={viewModeTab === 'TABS' ? "Cambiar a vista de todos los apartados desplegados (Acordeón)" : "Cambiar a vista de Pestañas individuales (Sin solapamientos)"}
+            >
+              {viewModeTab === 'TABS' ? "Ver Todo (Acordeón)" : "Ver en Pestañas"}
+            </button>
+            {viewModeTab === 'ACCORDION' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setAllSections(false)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[8.5px] border border-white/5 transition-colors cursor-pointer"
+                >
+                  Plegar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAllSections(true)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[8.5px] border border-white/5 transition-colors cursor-pointer"
+                >
+                  Desplegar
+                </button>
+              </>
+            )}
+          </div>
         </div>
+
+        {viewModeTab === 'TABS' && (
+          <div className="grid grid-cols-3 gap-1">
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('CLEANUP')}
+              className={`py-1.5 px-1 rounded flex items-center justify-center gap-1 font-semibold text-[9.5px] transition-all cursor-pointer ${
+                activeSubTab === 'CLEANUP'
+                  ? 'bg-cyan-600/30 text-cyan-300 border border-cyan-500/50 shadow-xs font-bold'
+                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-transparent'
+              }`}
+              title="Limpieza topológica, eliminar restos de polígonos, islas flotantes y caras inservibles"
+            >
+              <ShieldAlert size={11} className={activeSubTab === 'CLEANUP' ? 'text-cyan-400' : 'text-zinc-400'} />
+              <span className="truncate">Limpieza</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('TOOLS')}
+              className={`py-1.5 px-1 rounded flex items-center justify-center gap-1 font-semibold text-[9.5px] transition-all cursor-pointer ${
+                activeSubTab === 'TOOLS'
+                  ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/50 shadow-xs font-bold'
+                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-transparent'
+              }`}
+              title="Añadir líneas, extruir y operaciones según modo activo"
+            >
+              <Scissors size={11} className={activeSubTab === 'TOOLS' ? 'text-emerald-400' : 'text-zinc-400'} />
+              <span className="truncate">Edición</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('MODIFIERS')}
+              className={`py-1.5 px-1 rounded flex items-center justify-center gap-1 font-semibold text-[9.5px] transition-all cursor-pointer ${
+                activeSubTab === 'MODIFIERS'
+                  ? 'bg-amber-600/30 text-amber-300 border border-amber-500/50 shadow-xs font-bold'
+                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-transparent'
+              }`}
+              title="Modificadores Decimate, Voxel y Quad Remesh"
+            >
+              <Wrench size={11} className={activeSubTab === 'MODIFIERS' ? 'text-amber-400' : 'text-zinc-400'} />
+              <span className="truncate">Modificadores</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('WIREFRAME')}
+              className={`py-1.5 px-1 rounded flex items-center justify-center gap-1 font-semibold text-[9.5px] transition-all cursor-pointer ${
+                activeSubTab === 'WIREFRAME'
+                  ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/50 shadow-xs font-bold'
+                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-transparent'
+              }`}
+              title="Estructura alámbrica, celosía 3D y tubos"
+            >
+              <Grid size={11} className={activeSubTab === 'WIREFRAME' ? 'text-indigo-400' : 'text-zinc-400'} />
+              <span className="truncate">Alámbrico</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('SNAP')}
+              className={`py-1.5 px-1 rounded flex items-center justify-center gap-1 font-semibold text-[9.5px] transition-all cursor-pointer ${
+                activeSubTab === 'SNAP'
+                  ? 'bg-yellow-600/30 text-yellow-300 border border-yellow-500/50 shadow-xs font-bold'
+                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-transparent'
+              }`}
+              title="Ajuste imán a caras de otros objetos 3D"
+            >
+              <Magnet size={11} className={activeSubTab === 'SNAP' ? 'text-yellow-400' : 'text-zinc-400'} />
+              <span className="truncate">Imán Snap</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('SHORTCUTS')}
+              className={`py-1.5 px-1 rounded flex items-center justify-center gap-1 font-semibold text-[9.5px] transition-all cursor-pointer ${
+                activeSubTab === 'SHORTCUTS'
+                  ? 'bg-purple-600/30 text-purple-300 border border-purple-500/50 shadow-xs font-bold'
+                  : 'bg-zinc-800/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-transparent'
+              }`}
+              title="Atajos de teclado para modelado rápido"
+            >
+              <Keyboard size={11} className={activeSubTab === 'SHORTCUTS' ? 'text-purple-400' : 'text-zinc-400'} />
+              <span className="truncate">Atajos</span>
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* ── SECCIÓN 1: AÑADIR LÍNEAS, SEGMENTOS Y VÉRTICES ── */}
-      <div className="border-b border-zinc-900 overflow-hidden">
+      {/* ── Área de Contenido con Desplazamiento Vertical Garantizado (Sin recortes ni solapamientos) ── */}
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-2 space-y-3 scrollbar-thin scrollbar-thumb-zinc-700 pb-20 touch-pan-y">
+
+      {/* ── SECCIÓN 1 Y 2: HERRAMIENTAS DE EDICIÓN Y SEGMENTOS ── */}
+      {(viewModeTab === 'ACCORDION' || activeSubTab === 'TOOLS') && (
+        <>
+          {/* ── SECCIÓN 1: AÑADIR LÍNEAS, SEGMENTOS Y VÉRTICES ── */}
+          <div className="border border-zinc-800/80 rounded-xl overflow-hidden bg-zinc-900/30">
         <button
           type="button"
           onClick={() => toggleSection('linesAndVertices')}
           className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
         >
           <span className="font-bold text-zinc-200 group-hover:text-white flex items-center gap-1.5 text-xs">
-            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${sectionsOpen.linesAndVertices ? '' : '-rotate-90'}`} />
+            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.linesAndVertices) ? '' : '-rotate-90'}`} />
             <Scissors size={14} className="text-emerald-400" />
             <span>Añadir Líneas y Vértices</span>
           </span>
@@ -374,7 +490,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           </span>
         </button>
 
-        {sectionsOpen.linesAndVertices && (
+        {(viewModeTab === 'TABS' || sectionsOpen.linesAndVertices) && (
           <div className="px-3 pb-3 space-y-2.5">
             <p className="text-[10px] text-zinc-400 leading-relaxed">
               Conecta vértices para trazar nuevas aristas o divide líneas existentes para añadir puntos de control.
@@ -481,14 +597,14 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
   </div>
 
   {/* ── SECCIÓN 2: HERRAMIENTAS DE EDICIÓN SEGÚN MODO ACTIVO ── */}
-  <div className="border-b border-zinc-900 overflow-hidden">
+  <div className="border border-zinc-800/80 rounded-xl overflow-hidden bg-zinc-900/30 mt-2.5">
     <button
       type="button"
       onClick={() => toggleSection('modeOperations')}
       className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
     >
       <span className="font-bold text-zinc-200 group-hover:text-white flex items-center gap-1.5 text-xs">
-        <ChevronDown size={14} className={`text-zinc-400 transition-transform ${sectionsOpen.modeOperations ? '' : '-rotate-90'}`} />
+        <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.modeOperations) ? '' : '-rotate-90'}`} />
         <Sliders size={14} className="text-cyan-400" />
         <span>Operaciones de Edición ({editMode === 'VERTEX' ? 'Vértices' : editMode === 'EDGE' ? 'Bordes' : editMode === 'FACE' ? 'Caras' : 'Objeto'})</span>
       </span>
@@ -499,7 +615,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       </span>
     </button>
 
-    {sectionsOpen.modeOperations && (
+    {(viewModeTab === 'TABS' || sectionsOpen.modeOperations) && (
       <div className="px-3 pb-3 space-y-2.5">
         {editMode === 'OBJECT' && (
           <p className="text-[10px] text-zinc-400 py-1">
@@ -1061,16 +1177,19 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       </div>
     )}
   </div>
+  </>
+  )}
 
   {/* ── SECCIÓN 3: ESTRUCTURA ALÁMBRICA / WIREFRAME Y CARAS ── */}
-  <div className="border-b border-zinc-900 overflow-hidden bg-zinc-900/20">
+  {(viewModeTab === 'ACCORDION' || activeSubTab === 'WIREFRAME') && (
+  <div className="border border-zinc-800/80 rounded-xl overflow-hidden bg-zinc-900/30">
     <button
       type="button"
       onClick={() => toggleSection('wireframe')}
       className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
     >
       <span className="font-bold text-zinc-200 group-hover:text-white flex items-center gap-1.5 text-xs">
-        <ChevronDown size={14} className={`text-zinc-400 transition-transform ${sectionsOpen.wireframe ? '' : '-rotate-90'}`} />
+        <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.wireframe) ? '' : '-rotate-90'}`} />
         <Grid size={14} className="text-emerald-400" />
         <span>Estructura Alámbrica / Wireframe</span>
       </span>
@@ -1079,7 +1198,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       </span>
     </button>
 
-    {sectionsOpen.wireframe && (
+    {(viewModeTab === 'TABS' || sectionsOpen.wireframe) && (
       <div className="px-3 pb-3 space-y-2">
         <p className="text-[10px] text-zinc-400 leading-tight">
           Elimina caras para dejar el objeto alámbrico o genera tubos 3D sólidos imprimibles.
@@ -1112,16 +1231,18 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       </div>
     )}
   </div>
+  )}
 
       {/* ── SECCIÓN 4: HERRAMIENTAS AUTOMÁTICAS (MODIFICADORES) ── */}
-      <div className="border-b border-zinc-900 overflow-hidden bg-zinc-900/20">
+      {(viewModeTab === 'ACCORDION' || activeSubTab === 'MODIFIERS') && (
+      <div className="border border-zinc-800/80 rounded-xl overflow-hidden bg-zinc-900/30">
         <button
           type="button"
           onClick={() => toggleSection('modifiers')}
           className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
         >
           <span className="font-bold text-zinc-200 group-hover:text-white flex items-center gap-1.5 text-xs">
-            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${sectionsOpen.modifiers ? '' : '-rotate-90'}`} />
+            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.modifiers) ? '' : '-rotate-90'}`} />
             <Wrench size={14} className="text-amber-400" />
             <span>Modificadores Automáticos</span>
           </span>
@@ -1130,7 +1251,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           </span>
         </button>
 
-        {sectionsOpen.modifiers && (
+        {(viewModeTab === 'TABS' || sectionsOpen.modifiers) && (
           <div className="px-3 pb-3 space-y-3">
             <p className="text-[10px] text-zinc-400 leading-tight">
               Simplifica mallas pesadas, unifica piezas o reconstruye topologías limpias en segundos.
@@ -1343,16 +1464,18 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       </div>
     )}
   </div>
+  )}
 
   {/* ── SECCIÓN 5: AJUSTE A CARAS (FACE SNAPPING) ── */}
-  <div className="border-b border-zinc-900 overflow-hidden bg-zinc-900/20">
+  {(viewModeTab === 'ACCORDION' || activeSubTab === 'SNAP') && (
+  <div className="border border-zinc-800/80 rounded-xl overflow-hidden bg-zinc-900/30">
     <button
       type="button"
       onClick={() => toggleSection('faceSnap')}
       className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
     >
       <span className="font-bold text-zinc-200 group-hover:text-white flex items-center gap-1.5 text-xs">
-        <ChevronDown size={14} className={`text-zinc-400 transition-transform ${sectionsOpen.faceSnap ? '' : '-rotate-90'}`} />
+        <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.faceSnap) ? '' : '-rotate-90'}`} />
         <Magnet size={14} className={faceSnapConfig?.enabled ? 'text-amber-400' : 'text-zinc-400'} />
         <span>Ajuste a Caras (Face Snapping)</span>
       </span>
@@ -1373,7 +1496,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       </button>
     </button>
 
-    {sectionsOpen.faceSnap && (
+    {(viewModeTab === 'TABS' || sectionsOpen.faceSnap) && (
       <div className="px-3 pb-3 space-y-2">
         <p className="text-[10px] text-zinc-400 leading-tight">
           Imán de superficie que proyecta y ajusta vértices o el objeto directamente sobre las caras de otros modelos 3D al transformarlos.
@@ -1403,16 +1526,18 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       </div>
     )}
   </div>
+  )}
 
       {/* ── SECCIÓN 6: LIMPIEZA TOPOLÓGICA Y CURADO (CLEAN UP) ── */}
-      <div className="border-b border-zinc-900 overflow-hidden">
+      {(viewModeTab === 'ACCORDION' || activeSubTab === 'CLEANUP') && (
+      <div className="border border-cyan-500/30 rounded-xl overflow-hidden bg-zinc-900/30">
         <button
           type="button"
           onClick={() => toggleSection('cleanUp')}
           className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
         >
           <span className="font-bold text-zinc-200 group-hover:text-white flex items-center gap-1.5 text-xs">
-            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${sectionsOpen.cleanUp ? '' : '-rotate-90'}`} />
+            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.cleanUp) ? '' : '-rotate-90'}`} />
             <ShieldAlert size={14} className="text-cyan-400" />
             <span>Limpieza Topológica (Clean Up)</span>
           </span>
@@ -1421,8 +1546,154 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           </span>
         </button>
 
-        {sectionsOpen.cleanUp && (
+        {(viewModeTab === 'TABS' || sectionsOpen.cleanUp) && (
           <div className="px-3 pb-3 space-y-2.5">
+            {/* ── 1. SOLUCIÓN DIRECTA A ESCOMBROS: ELIMINAR ISLAS Y FRAGMENTOS FLOTANTES ── */}
+            <div className="p-3 bg-gradient-to-br from-cyan-950/60 to-zinc-900 border border-cyan-500/40 rounded-xl space-y-2 shadow-lg shadow-cyan-950/20">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-cyan-200 flex items-center gap-1.5">
+                  <ShieldCheck size={14} className="text-cyan-400" />
+                  Eliminar Restos de Polígonos e Islas
+                </span>
+                <span className="text-[9px] font-mono px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-700/50 font-bold">
+                  Solución 1-Clic
+                </span>
+              </div>
+
+              <p className="text-[9.5px] text-zinc-300 leading-tight">
+                Purga instantáneamente restos flotantes, polígonos inservibles y esquirlas que ensucian el objeto.
+              </p>
+
+              <div className="space-y-1.5 pt-1">
+                <button
+                  type="button"
+                  disabled={isProcessingModifier}
+                  onClick={async () => {
+                    setIsProcessingModifier(true);
+                    try {
+                      const res = await purgeMeshIslandsAction(obj.id, { keepOnlyLargest: true });
+                      showFeedback(res.message);
+                    } catch (e: any) {
+                      showFeedback(`Error: ${e?.message || e}`);
+                    } finally {
+                      setIsProcessingModifier(false);
+                    }
+                  }}
+                  className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 via-teal-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white font-bold rounded-lg text-[10.5px] flex items-center justify-center gap-2 shadow-md shadow-cyan-900/30 border border-cyan-400/40 cursor-pointer active:scale-[0.98] transition-all"
+                  title="Conserva únicamente el cuerpo principal de la figura y vaporiza todos los polígonos flotantes e islas desconectadas"
+                >
+                  <Sparkles size={13} className="text-cyan-200" />
+                  <span>Conservar sólo Cuerpo Principal (Borrar Escombros)</span>
+                </button>
+
+                <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                  <button
+                    type="button"
+                    disabled={isProcessingModifier}
+                    onClick={async () => {
+                      setIsProcessingModifier(true);
+                      try {
+                        const res = await purgeMeshIslandsAction(obj.id, { keepOnlyLargest: false, minFacesThreshold: 15 });
+                        showFeedback(res.message);
+                      } catch (e: any) {
+                        showFeedback(`Error: ${e?.message || e}`);
+                      } finally {
+                        setIsProcessingModifier(false);
+                      }
+                    }}
+                    className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-[9.5px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 cursor-pointer"
+                    title="Elimina cualquier fragmento aislado que tenga menos de 15 caras"
+                  >
+                    <Filter size={11} className="text-cyan-400" />
+                    <span>Borrar Islas &lt; 15 caras</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isProcessingModifier}
+                    onClick={async () => {
+                      setIsProcessingModifier(true);
+                      try {
+                        const res = await purgeDebrisPolygonsAction(obj.id, 1e-6);
+                        showFeedback(res.message);
+                      } catch (e: any) {
+                        showFeedback(`Error: ${e?.message || e}`);
+                      } finally {
+                        setIsProcessingModifier(false);
+                      }
+                    }}
+                    className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-[9.5px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 cursor-pointer"
+                    title="Elimina caras degeneradas de área cero, astillas y polígonos duplicados coplanares"
+                  >
+                    <Eraser size={11} className="text-amber-400" />
+                    <span>Poda de Caras Degeneradas</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* ── 2. SELECCIÓN DE RESTOS Y BORRADO MANUAL ── */}
+            <div className="p-2.5 bg-zinc-900/70 border border-zinc-800 rounded-xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-1">
+                  <Link2 size={12} className="text-indigo-400" />
+                  Selección Rápida de Fragmentos
+                </span>
+                <span className="text-[9px] text-zinc-500 font-mono">Teclas L / Supr</span>
+              </div>
+
+              <p className="text-[9.5px] text-zinc-400 leading-tight">
+                Haz clic en una cara del resto no deseado y pulsa "Seleccionar Isla" para seleccionarlo por completo.
+              </p>
+
+              <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = selectLinkedAction(obj.id);
+                    showFeedback(res.message);
+                  }}
+                  className="py-1.5 px-2 bg-indigo-900/60 hover:bg-indigo-800/80 text-indigo-200 hover:text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 border border-indigo-700/50 cursor-pointer"
+                  title="Selecciona automáticamente toda la isla de polígonos conectada (Tecla L)"
+                >
+                  <Split size={12} className="text-indigo-400" />
+                  <span>Seleccionar Isla (L)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = invertSelectionAction();
+                    showFeedback(res.message);
+                  }}
+                  className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 border border-zinc-700 cursor-pointer"
+                  title="Invierte la selección actual (Ctrl + I)"
+                >
+                  <Repeat size={12} className="text-zinc-400" />
+                  <span>Invertir Sel. (Ctrl+I)</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={selectedFaceIndices.length === 0 && selectedVertexIndices.length === 0}
+                  onClick={() => {
+                    if (editMode === 'VERTEX') {
+                      const res = deleteSelectedVertices(obj.id, selectedVertexIndices);
+                      showFeedback(res.message);
+                    } else {
+                      const res = deleteSelectedFaces(obj.id, selectedFaceIndices);
+                      showFeedback(res.message);
+                    }
+                  }}
+                  className="col-span-2 py-2 px-2 bg-rose-950/80 hover:bg-rose-900 text-rose-200 hover:text-white disabled:opacity-40 rounded-lg text-[10.5px] font-bold flex items-center justify-center gap-1.5 border border-rose-800/60 cursor-pointer transition-colors shadow-xs"
+                  title="Elimina definitivamente las caras o vértices seleccionados (Tecla Supr / Delete)"
+                >
+                  <Trash2 size={13} className="text-rose-400" />
+                  <span>Eliminar Selección de la Figura (Supr)</span>
+                </button>
+              </div>
+            </div>
+
             {/* Fusionar por Distancia (Merge by Distance) */}
             <div className="space-y-2 p-2.5 bg-zinc-900/80 rounded-xl border border-cyan-500/30 shadow-inner">
               <div className="flex items-center justify-between text-[11px]">
@@ -1556,16 +1827,18 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           </div>
         )}
       </div>
+      )}
 
       {/* ── SECCIÓN 7: GUÍA DE ATAJOS ── */}
-      <div className="overflow-hidden bg-zinc-900/10">
+      {(viewModeTab === 'ACCORDION' || activeSubTab === 'SHORTCUTS') && (
+      <div className="border border-purple-500/20 rounded-xl overflow-hidden bg-zinc-900/30">
         <button
           type="button"
           onClick={() => toggleSection('shortcuts')}
           className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
         >
           <span className="font-bold text-zinc-400 group-hover:text-zinc-200 flex items-center gap-1.5 text-xs uppercase tracking-wider">
-            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${sectionsOpen.shortcuts ? '' : '-rotate-90'}`} />
+            <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.shortcuts) ? '' : '-rotate-90'}`} />
             <span>Atajos Rápidos de Modelado</span>
           </span>
           <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">
@@ -1573,7 +1846,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           </span>
         </button>
 
-        {sectionsOpen.shortcuts && (
+        {(viewModeTab === 'TABS' || sectionsOpen.shortcuts) && (
           <div className="px-3 pb-3 space-y-2">
             <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9.5px] text-zinc-400">
               <div><kbd className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200 font-mono">1</kbd> Modo Objeto</div>
@@ -1588,6 +1861,9 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           </div>
         )}
       </div>
+      )}
+
+      </div> {/* ── Fin del Contenedor con Scroll Garantizado ── */}
 
       {/* Wireframe Modal */}
       {showWireframeModal && (
