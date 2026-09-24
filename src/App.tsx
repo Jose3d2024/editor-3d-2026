@@ -18,15 +18,13 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isTimelineCollapsed, setIsTimelineCollapsed] = useState(true);
 
-  const {
-    isBooleanModalOpen,
-    closeBooleanModal,
-    booleanModalTargetId,
-    booleanModalToolId,
-    isMaterialStudioOpen,
-    isBlueprintModalOpen,
-    closeBlueprintModal,
-  } = useStore();
+  const isBooleanModalOpen = useStore(state => state.isBooleanModalOpen);
+  const closeBooleanModal = useStore(state => state.closeBooleanModal);
+  const booleanModalTargetId = useStore(state => state.booleanModalTargetId);
+  const booleanModalToolId = useStore(state => state.booleanModalToolId);
+  const isMaterialStudioOpen = useStore(state => state.isMaterialStudioOpen);
+  const isBlueprintModalOpen = useStore(state => state.isBlueprintModalOpen);
+  const closeBlueprintModal = useStore(state => state.closeBlueprintModal);
 
   useEffect(() => {
     const initApplication = async () => {

@@ -706,10 +706,18 @@ export const MaterialStudioViewport: React.FC = () => {
       threeRefs.current.renderer.setSize(w, h);
     };
 
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      console.warn('[MaterialStudioViewport] WebGL Context Lost event prevented.');
+    };
+    const canvas = canvasRef.current;
+    canvas?.addEventListener('webglcontextlost', handleContextLost, false);
+
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(container);
 
     return () => {
+      canvas?.removeEventListener('webglcontextlost', handleContextLost);
       resizeObserver.disconnect();
       if (threeRefs.current?.reqId) {
         cancelAnimationFrame(threeRefs.current.reqId);

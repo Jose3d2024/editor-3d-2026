@@ -1234,8 +1234,21 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
     controls.addEventListener('change', updateCamState);
 
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      console.warn('[Viewport] WebGL Context Lost event prevented.');
+    };
+    const handleContextRestored = () => {
+      console.info('[Viewport] WebGL Context Restored.');
+    };
+    const canvas = renderer.domElement;
+    canvas.addEventListener('webglcontextlost', handleContextLost, false);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+
     renderer.render(scene, camera);
     return () => {
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       if (rendererRef.current) {
         rendererRef.current.dispose();
         rendererRef.current.forceContextLoss();
