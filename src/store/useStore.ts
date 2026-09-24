@@ -3577,16 +3577,16 @@ export const useStore = create<Store>()((set, get) => ({
     const isSilhouette = options?.silhouetteOnly ?? false;
     const creaseAngle = isSilhouette 
       ? Math.max(35.0, options?.creaseAngleDeg ?? 35.0) 
-      : (options?.creaseAngleDeg ?? 20.0);
+      : (options?.creaseAngleDeg ?? 25.0);
     const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? (obj.meshData as any)?.verticesCount ?? 0;
     const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? (obj.meshData as any)?.facesCount ?? 0;
 
     set({
       meshProcessing: {
         active: true,
-        title: isSilhouette ? 'Silueta Pura (Mínimos Polígonos)' : 'Estilo Low-Poly Blueprint (1 Clic)',
-        subtitle: isSilhouette ? 'Extrayendo contornos exteriores y disolviendo caras coplanares...' : 'Unificando superficies coplanares y configurando aristas técnicas...',
-        progress: 25,
+        title: isSilhouette ? 'Silueta Limpia (Líneas Maestras)' : 'Estilo Blueprint (Aristas Técnicas)',
+        subtitle: 'Eliminando líneas cruzadas y diagonales de polígonos...',
+        progress: 35,
         objectName: obj.name,
         vertCount: initialVerts,
         faceCount: initialFaces,
@@ -3596,130 +3596,82 @@ export const useStore = create<Store>()((set, get) => ({
 
     try {
       let updatedObj: CSGObject;
-      let usedGltfPipeline = false;
 
-      // Si se solicita silueta pura o forceNativeConversion, evitamos el GLB pipeline opaco y convertimos a geometría nativa
-      // para poder disolver absolutamente todas las aristas internas coplanares y dejar caras 100% limpias.
-      if (!isSilhouette && !options?.forceNativeConversion && obj.meshData && obj.meshData.type === 'gltf') {
-        try {
-          let intermediateObj = obj;
-          const targetRatio = options?.targetFaceRatio ?? (
-            initialFaces > 30000 ? 0.10 :
-            initialFaces > 10000 ? 0.18 :
-            initialFaces > 3000 ? 0.25 : 0.35
-          );
-
-          set(s => ({
-            meshProcessing: s.meshProcessing ? {
-              ...s.meshProcessing,
-              progress: 35,
-              subtitle: `Decimando a Low-Poly (${Math.round(targetRatio * 100)}% caras)...`
-            } : null
-          }));
-
-          const { optimizeGLBModel } = await import('../utils/glb_processor');
-          intermediateObj = await optimizeGLBModel(
-            intermediateObj,
-            2,
-            (prog, step) => {
-              set(s => ({
-                meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: Math.min(60, 30 + Math.floor(prog * 0.3)), subtitle: step } : null
-              }));
-            },
-            undefined,
-            { ratio: targetRatio, preserveCreases: true }
-          );
-
-          const intermediateFaces = intermediateObj.stats?.faces ?? initialFaces;
-          const didReduceInGLB = intermediateFaces < initialFaces * 0.85;
-
-          if (didReduceInGLB) {
-            set(s => ({
-              meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: 65, subtitle: 'Disolviendo triángulos en paneles coplanares (Limited Dissolve)...' } : null
-            }));
-            const { dissolveCoplanarGLBModel } = await import('../utils/glb_processor');
-            const dissolvedObj = await dissolveCoplanarGLBModel(
-              intermediateObj,
-              creaseAngle,
-              (prog, step) => {
-                set(s => ({
-                  meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: Math.min(88, 65 + Math.floor(prog * 0.25)), subtitle: step } : null
-                }));
-              }
-            );
-
-            updatedObj = {
-              ...dissolvedObj,
-              blueprintStyle: true,
-              silhouetteOnly: isSilhouette,
-              creaseAngle,
-              showWireframe: true,
-              smoothShading: false,
-              stats: dissolvedObj.stats || intermediateObj.stats || obj.stats,
-            };
-            usedGltfPipeline = true;
-          }
-        } catch (glbErr) {
-          console.warn('Pipeline GLB no pudo simplificar la malla, usando decimate nativo robusto:', glbErr);
-        }
-      }
-
-      if (!usedGltfPipeline) {
-        // PIPELINE NATIVO DE ALTA PRECISIÓN:
-        // Convierte modelos importados (OBJ, STL, GLTF sin decimar) a malla poligonal nativa
-        if (obj.meshData) {
-          set(s => ({
-            meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: 30, subtitle: 'Extrayendo polígonos a malla nativa unificada...' } : null
-          }));
+      // Si el objeto es importado (FBX/GLTF/OBJ con meshData) y NO se solicitó reducción explícita (targetFaceRatio)
+      // PRESERVAR la geometría original y meshData intacta sin destruirla ni desfigurarla
+      if (obj.meshData && options?.targetFaceRatio === undefined && !options?.forceNativeConversion) {
+        updatedObj = {
+          ...obj,
+          blueprintStyle: true,
+          silhouetteOnly: isSilhouette,
+          creaseAngle,
+          showWireframe: true,
+          smoothShading: false,
+          color: '#091b33',
+          originalColor: (obj as any).originalColor || obj.color,
+          stats: obj.stats || { vertices: initialVerts, faces: initialFaces },
+        };
+      } else {
+        // Objeto nativo o usuario que solicitó reducción/conversión explícita
+        if (obj.meshData && (options?.targetFaceRatio !== undefined || options?.forceNativeConversion)) {
           const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
           obj = await convertImportedToCSG(obj);
         }
 
         if (!obj.vertices || obj.vertices.length === 0) {
           const { fromThreeGeometry } = await import('../utils/modifiers');
+          const { createBaseGeometry } = await import('../utils/csg');
           const geo = createBaseGeometry(obj);
           const res = fromThreeGeometry(geo);
           obj = { ...obj, vertices: res.vertices, faces: res.faces };
         }
 
-        const facesBefore = obj.faces?.length || initialFaces;
-        const targetRatio = options?.targetFaceRatio ?? (
-          isSilhouette ? (facesBefore > 10000 ? 0.04 : facesBefore > 2000 ? 0.08 : 0.15) :
-          facesBefore > 30000 ? 0.10 :
-          facesBefore > 10000 ? 0.18 :
-          facesBefore > 3000 ? 0.25 : 0.40
-        );
+        let currVerts = obj.vertices!;
+        let currFaces = obj.faces!;
 
-        // Decimar a bajo polígono (Low-Poly) mediante Quadric Error Metric edge-collapse
-        if ((facesBefore > 150 || options?.targetFaceRatio !== undefined) && obj.vertices && obj.vertices.length > 0 && obj.faces && obj.faces.length > 0) {
+        // Solo decimar si el usuario lo pidió explícitamente con targetFaceRatio
+        if (options?.targetFaceRatio !== undefined && currFaces.length > 50) {
           set(s => ({
             meshProcessing: s.meshProcessing ? {
               ...s.meshProcessing,
-              progress: 50,
-              subtitle: `Decimando geometría a los mínimos polígonos posibles (${Math.round(targetRatio * 100)}% caras)...`
+              progress: 55,
+              subtitle: `Optimizando caras (${Math.round(options.targetFaceRatio! * 100)}%)...`
             } : null
           }));
           const { optimizeMesh } = await import('../utils/modifiers');
-          const decimated = optimizeMesh(obj, targetRatio);
+          const decimated = optimizeMesh({ ...obj, vertices: currVerts, faces: currFaces }, options.targetFaceRatio);
           if (decimated.faces && decimated.faces.length > 0) {
-            obj = { ...obj, vertices: decimated.vertices, faces: decimated.faces };
+            currVerts = decimated.vertices;
+            currFaces = decimated.faces;
           }
         }
 
+        // Convertir pares de triángulos adyacentes a Quads (Tris to Quads) para disolver diagonales internas
         set(s => ({
-          meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: 75, subtitle: 'Disolviendo caras coplanares en paneles limpios...' } : null
+          meshProcessing: s.meshProcessing ? {
+            ...s.meshProcessing,
+            progress: 75,
+            subtitle: 'Disolviendo diagonales internas y unificando cuadriláteros...'
+          } : null
         }));
-        const { dissolveCoplanarFaces } = await import('../utils/meshUtils');
+        const { convertTrisToQuads, dissolveCoplanarFaces } = await import('../utils/meshUtils');
+        const quadRes = convertTrisToQuads({ vertices: currVerts, faces: currFaces }, creaseAngle);
+        currFaces = quadRes.faces;
+
+        // Disolver caras coplanares adicionales en paneles limpios
         const dissolveRes = dissolveCoplanarFaces(
-          { vertices: obj.vertices!, faces: obj.faces! },
+          { vertices: currVerts, faces: currFaces },
           creaseAngle,
           { collinearToleranceDeg: isSilhouette ? 6.0 : 4.0 }
         );
+        currVerts = dissolveRes.vertices;
+        currFaces = dissolveRes.faces;
 
+        // Extraer aristas técnicas sin líneas cruzadas
         const { extractFeatureEdges } = await import('../utils/wireframeMesh');
         const featureEdges = extractFeatureEdges({
-          vertices: dissolveRes.vertices,
-          faces: dissolveRes.faces,
+          vertices: currVerts,
+          faces: currFaces,
           silhouetteOnly: isSilhouette,
         }, creaseAngle);
 
@@ -3727,18 +3679,18 @@ export const useStore = create<Store>()((set, get) => ({
           ...obj,
           type: 'MESH',
           parameters: {},
-          vertices: dissolveRes.vertices,
-          faces: dissolveRes.faces,
-          meshData: undefined, // CRÍTICO: eliminar meshData para que el Viewport renderice la nueva geometría Low-Poly
+          vertices: currVerts,
+          faces: currFaces,
+          meshData: undefined,
           wireframeEdges: featureEdges,
           blueprintStyle: true,
           silhouetteOnly: isSilhouette,
           creaseAngle,
           showWireframe: true,
           smoothShading: false,
-          color: (obj.color && obj.color !== '#08182b') ? obj.color : '#e2e8f0',
+          color: '#091b33',
           originalColor: (obj as any).originalColor || ((obj.color && obj.color !== '#08182b') ? obj.color : '#e2e8f0'),
-          stats: { vertices: dissolveRes.vertices.length, faces: dissolveRes.faces.length }
+          stats: { vertices: currVerts.length, faces: currFaces.length }
         };
       }
 
@@ -3754,26 +3706,28 @@ export const useStore = create<Store>()((set, get) => ({
 
       const finalVerts = updatedObj.stats?.vertices ?? updatedObj.vertices?.length ?? initialVerts;
       const finalFaces = updatedObj.stats?.faces ?? updatedObj.faces?.length ?? initialFaces;
-      const savedFaces = Math.max(0, initialFaces - finalFaces);
-      const reductionPct = initialFaces > 0 ? Math.round((savedFaces / initialFaces) * 100) : 0;
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {
           ...s.meshProcessing,
           progress: 100,
-          subtitle: `¡Estilo Blueprint aplicado! (${finalFaces.toLocaleString()} caras ${reductionPct > 0 ? `· -${reductionPct}%` : ''} · aristas técnicas activas)`,
+          subtitle: `¡Estilo Blueprint aplicado! (${finalFaces.toLocaleString()} caras · aristas técnicas sin líneas cruzadas)`,
           completed: true,
           finalVertCount: finalVerts,
           finalFaceCount: finalFaces,
         } : null
       }));
 
+      setTimeout(() => {
+        set({ meshProcessing: null });
+      }, 1200);
+
       return {
         success: true,
-        message: `Estilo Blueprint aplicado con aristas técnicas y geometría protegida (${finalFaces.toLocaleString()} caras).`
+        message: `Estilo Blueprint aplicado: aristas técnicas limpias sin líneas cruzadas (${finalFaces.toLocaleString()} caras).`
       };
     } catch (err: any) {
-      console.error(err);
+      console.error('Error aplicando estilo blueprint:', err);
       set({ meshProcessing: null });
       return { success: false, message: `Error al aplicar Estilo Blueprint: ${err.message || 'Error desconocido'}` };
     }
@@ -5845,51 +5799,254 @@ export const useStore = create<Store>()((set, get) => ({
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return { success: false, message: 'Objeto no encontrado.' };
-    if (!obj.vertices || obj.vertices.length === 0) return { success: false, message: 'No hay vértices en el objeto.' };
 
-    const { deleteLooseElements } = await import('../utils/meshUtils');
-    const res = deleteLooseElements(obj);
-    get().updateObject(id, {
-      vertices: res.vertices,
-      faces: res.faces,
-      stats: { vertices: res.vertices.length, faces: res.faces.length }
+    const initialVerts = (obj.vertices && obj.vertices.length > 0)
+      ? obj.vertices.length
+      : (obj.stats?.vertices || (obj.meshData as any)?.verticesCount || 0);
+    const initialFaces = (obj.faces && obj.faces.length > 0)
+      ? obj.faces.length
+      : (obj.stats?.faces || (obj.meshData as any)?.facesCount || 0);
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Limpieza: Borrar Geometría Suelta',
+        subtitle: 'Buscando y purgando vértices y aristas aisladas sin caras...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
     });
-    get().saveHistory('Clean Up: Delete Loose', 'edit');
-    return { success: true, message: res.report.join(', ') };
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) {
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      }
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const { createBaseGeometry } = await import('../utils/csg');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      }
+
+      if (!obj.vertices || obj.vertices.length === 0) {
+        set({ meshProcessing: null });
+        return { success: false, message: 'No se pudieron extraer vértices del objeto.' };
+      }
+
+      const { deleteLooseElements } = await import('../utils/meshUtils');
+      const res = deleteLooseElements(obj);
+
+      get().updateObject(id, {
+        meshData: undefined,
+        vertices: res.vertices,
+        faces: res.faces,
+        stats: { vertices: res.vertices.length, faces: res.faces.length }
+      });
+      get().saveHistory('Clean Up: Delete Loose', 'edit');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Elementos sueltos purgados! (${res.report.join(', ')})`,
+          completed: true,
+          vertCount: obj.vertices.length,
+          faceCount: obj.faces.length,
+          finalVertCount: res.vertices.length,
+          finalFaceCount: res.faces.length,
+        } : null
+      }));
+
+      return { success: true, message: res.report.join(', ') };
+    } catch (err: any) {
+      set({ meshProcessing: null });
+      return { success: false, message: `Error al borrar sueltos: ${err?.message || err}` };
+    }
   },
 
   dissolveDegenerateGeometry: async (id: string, minArea = 1e-7) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return { success: false, message: 'Objeto no encontrado.' };
-    if (!obj.vertices || obj.vertices.length === 0) return { success: false, message: 'No hay vértices en el objeto.' };
 
-    const { dissolveDegenerateElements } = await import('../utils/meshUtils');
-    const res = dissolveDegenerateElements(obj, minArea);
-    get().updateObject(id, {
-      vertices: res.vertices,
-      faces: res.faces,
-      stats: { vertices: res.vertices.length, faces: res.faces.length }
+    const initialVerts = (obj.vertices && obj.vertices.length > 0)
+      ? obj.vertices.length
+      : (obj.stats?.vertices || (obj.meshData as any)?.verticesCount || 0);
+    const initialFaces = (obj.faces && obj.faces.length > 0)
+      ? obj.faces.length
+      : (obj.stats?.faces || (obj.meshData as any)?.facesCount || 0);
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Limpieza: Disolver Caras Degeneradas',
+        subtitle: 'Detectando y colapsando polígonos degenerados con área nula...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
     });
-    get().saveHistory('Clean Up: Degenerate Dissolve', 'edit');
-    return { success: true, message: res.report.join(', ') };
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) {
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      }
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const { createBaseGeometry } = await import('../utils/csg');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      }
+
+      if (!obj.vertices || obj.vertices.length === 0) {
+        set({ meshProcessing: null });
+        return { success: false, message: 'No se pudieron extraer vértices del objeto.' };
+      }
+
+      const { dissolveDegenerateElements } = await import('../utils/meshUtils');
+      const res = dissolveDegenerateElements(obj, minArea);
+
+      get().updateObject(id, {
+        meshData: undefined,
+        vertices: res.vertices,
+        faces: res.faces,
+        stats: { vertices: res.vertices.length, faces: res.faces.length }
+      });
+      get().saveHistory('Clean Up: Degenerate Dissolve', 'edit');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Caras degeneradas disueltas! (${res.report.join(', ')})`,
+          completed: true,
+          vertCount: obj.vertices.length,
+          faceCount: obj.faces.length,
+          finalVertCount: res.vertices.length,
+          finalFaceCount: res.faces.length,
+        } : null
+      }));
+
+      return { success: true, message: res.report.join(', ') };
+    } catch (err: any) {
+      set({ meshProcessing: null });
+      return { success: false, message: `Error al disolver degeneradas: ${err?.message || err}` };
+    }
   },
 
   mergeVerticesByDistanceAction: async (id: string, distance = 0.001) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return { success: false, message: 'Objeto no encontrado.' };
-    if (!obj.vertices || obj.vertices.length === 0) return { success: false, message: 'No hay vértices en el objeto.' };
 
-    const { repairMesh } = await import('../utils/meshUtils');
-    const res = repairMesh(obj, distance);
-    get().updateObject(id, {
-      vertices: res.vertices,
-      faces: res.faces,
-      stats: { vertices: res.vertices.length, faces: res.faces.length }
+    const initialVerts = (obj.vertices && obj.vertices.length > 0)
+      ? obj.vertices.length
+      : (obj.stats?.vertices || (obj.meshData as any)?.verticesCount || 0);
+    const initialFaces = (obj.faces && obj.faces.length > 0)
+      ? obj.faces.length
+      : (obj.stats?.faces || (obj.meshData as any)?.facesCount || 0);
+
+    // Mostrar ventana modal con barra de progreso y estado de ejecución
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Fusionar por Distancia (Merge by Distance)',
+        subtitle: `Localizando vértices duplicados con tolerancia <= ${(distance * 1000).toFixed(2)}mm...`,
+        progress: 25,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
     });
-    get().saveHistory(`Merge by Distance (${distance})`, 'edit');
-    return { success: true, message: res.report.join(', ') };
+    await new Promise(r => setTimeout(r, 45));
+
+    try {
+      // Si el objeto proviene de un archivo importado FBX/GLTF/OBJ o tiene meshData
+      if (obj.meshData) {
+        set(s => ({
+          meshProcessing: s.meshProcessing ? {
+            ...s.meshProcessing,
+            subtitle: 'Desglosando geometría de modelo importado a vértices editables...',
+            progress: 45
+          } : null
+        }));
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      }
+
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const { createBaseGeometry } = await import('../utils/csg');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      }
+
+      if (!obj.vertices || obj.vertices.length === 0) {
+        set({ meshProcessing: null });
+        return { success: false, message: 'No se pudieron extraer los vértices del objeto.' };
+      }
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          subtitle: `Fusionando ${obj.vertices.length} vértices en grid 3D (tolerancia ${(distance * 1000).toFixed(2)}mm)...`,
+          progress: 75,
+          vertCount: obj.vertices.length,
+          faceCount: obj.faces.length
+        } : null
+      }));
+
+      const { repairMesh } = await import('../utils/meshUtils');
+      const res = repairMesh(obj, distance);
+
+      const vertDelta = obj.vertices.length - res.vertices.length;
+
+      get().updateObject(id, {
+        meshData: undefined, // Limpiar meshData para que Three.js renderice la nueva geometría limpia y reparada
+        vertices: res.vertices,
+        faces: res.faces,
+        vertexOffsets: {},
+        stats: { vertices: res.vertices.length, faces: res.faces.length }
+      });
+      get().saveHistory(`Merge by Distance (${distance})`, 'edit');
+
+      const outcomeMsg = vertDelta > 0
+        ? `¡Éxito! Se fusionaron ${vertDelta.toLocaleString()} vértices duplicados.`
+        : `¡Malla verificada! No se hallaron vértices duplicados a distancia <= ${(distance * 1000).toFixed(2)}mm.`;
+
+      // Mostrar ventana modal con resumen de lo que ha hecho
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: outcomeMsg,
+          completed: true,
+          vertCount: obj.vertices.length,
+          faceCount: obj.faces.length,
+          finalVertCount: res.vertices.length,
+          finalFaceCount: res.faces.length,
+        } : null
+      }));
+
+      return { 
+        success: true, 
+        message: `${res.report.join(', ')} (${vertDelta} vértices fusionados)` 
+      };
+    } catch (err: any) {
+      console.error('Error en mergeVerticesByDistanceAction:', err);
+      set({ meshProcessing: null });
+      return { success: false, message: `Error al fusionar: ${err?.message || err}` };
+    }
   },
 
   deleteSelectedEdges: (id: string, edgeIndices?: number[]) => {

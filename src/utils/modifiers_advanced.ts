@@ -1117,13 +1117,17 @@ export async function simplifyMesh(
       }
       // NUNCA recurrir a simplifySloppy en mallas con UVs para proteger las texturas
     } else {
-      // Simplificación posicional estándar para mallas sin texturas
+      // Simplificación posicional estándar con reintentos progresivos controlados
       const attempts = [
-        { err: 0.05, flags: ['LockBorder'] as any },
-        { err: 0.15, flags: ['LockBorder'] as any },
+        { err: 0.03, flags: ['LockBorder'] as any },
+        { err: 0.08, flags: ['LockBorder'] as any },
+        { err: 0.18, flags: ['LockBorder'] as any },
         { err: 0.35, flags: ['LockBorder'] as any },
         { err: 0.70, flags: ['LockBorder'] as any },
-        { err: 0.50, flags: [] as any },
+        { err: 0.15, flags: [] as any },
+        { err: 0.35, flags: [] as any },
+        { err: 0.70, flags: [] as any },
+        { err: 0.95, flags: [] as any },
       ];
 
       for (const att of attempts) {
@@ -1142,25 +1146,7 @@ export async function simplifyMesh(
           }
         } catch (e) {}
       }
-
-      // Solo para mallas sin UVs aplicamos fallback sloppy si la topología está muy bloqueada
-      if ((!resultIndices || resultIndices.length === indexArray.length) && targetRatio <= 0.7) {
-        try {
-          const sloppyRes = Meshopt.simplifySloppy(
-            indexArray,
-            posArray,
-            3,
-            null,
-            targetCount,
-            0.4
-          );
-          if (sloppyRes && sloppyRes[0] && sloppyRes[0].length >= 12 && sloppyRes[0].length < indexArray.length) {
-            resultIndices = sloppyRes[0];
-          }
-        } catch (eSloppy) {
-          console.warn('Meshopt simplifySloppy fallback error:', eSloppy);
-        }
-      }
+      // NUNCA usamos simplifySloppy porque dobla triángulos unos sobre otros y destruye la topología
     }
 
     let finalIndices = resultIndices && resultIndices.length > 0 ? resultIndices : indexArray;
@@ -1192,6 +1178,7 @@ export async function simplifyMesh(
 
     const defaultMatIdx = obj.faces?.[0]?.materialIndex;
     const finalFaces: MeshFace[] = [];
+    const seenTriKeys = new Set<string>();
 
     for (let i = 0; i < finalIndices.length; i += 3) {
       const idxA = finalIndices[i];
@@ -1201,6 +1188,27 @@ export async function simplifyMesh(
       const newA = oldToNew.get(idxA) ?? 0;
       const newB = oldToNew.get(idxB) ?? 0;
       const newC = oldToNew.get(idxC) ?? 0;
+
+      // Filtrar triángulos degenerados (índices duplicados)
+      if (newA === newB || newB === newC || newC === newA) continue;
+
+      // Filtrar triángulos duplicados
+      const minI = Math.min(newA, newB, newC);
+      const maxI = Math.max(newA, newB, newC);
+      const midI = (newA + newB + newC) - minI - maxI;
+      const triKey = `${minI}_${midI}_${maxI}`;
+      if (seenTriKeys.has(triKey)) continue;
+      seenTriKeys.add(triKey);
+
+      // Filtrar triángulos colapsados de área cero
+      const pA = compactedVertices[newA], pB = compactedVertices[newB], pC = compactedVertices[newC];
+      if (!pA || !pB || !pC) continue;
+      const abX = pB[0] - pA[0], abY = pB[1] - pA[1], abZ = pB[2] - pA[2];
+      const acX = pC[0] - pA[0], acY = pC[1] - pA[1], acZ = pC[2] - pA[2];
+      const crX = abY * acZ - abZ * acY;
+      const crY = abZ * acX - abX * acZ;
+      const crZ = abX * acY - abY * acX;
+      if (crX * crX + crY * crY + crZ * crZ < 1e-12) continue;
 
       const faceMat = vertToMat.get(idxA) ?? vertToMat.get(idxB) ?? defaultMatIdx;
       const face: MeshFace = {
@@ -1219,13 +1227,23 @@ export async function simplifyMesh(
       finalFaces.push(face);
     }
 
+    // Convertir pares de triángulos coplanares restantes en quads limpios
+    let cleanFaces = finalFaces;
+    try {
+      const { convertTrisToQuads } = await import('./meshUtils');
+      const quadRes = convertTrisToQuads({ vertices: compactedVertices, faces: finalFaces }, 25.0);
+      if (quadRes && quadRes.faces && quadRes.faces.length > 0) {
+        cleanFaces = quadRes.faces;
+      }
+    } catch (_) {}
+
     const optimizedCSG: CSGObject = {
       ...obj,
       vertices: compactedVertices,
-      faces: finalFaces,
+      faces: cleanFaces,
       vertexOffsets: {},
       meshData: undefined,
-      stats: { vertices: compactedVertices.length, faces: finalFaces.length }
+      stats: { vertices: compactedVertices.length, faces: cleanFaces.length }
     };
 
     // Solo para mallas sin UVs aplicamos fillHoles si es necesario

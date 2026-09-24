@@ -31,7 +31,8 @@ import {
   Filter,
   Eraser,
   ShieldCheck,
-  ChevronDown
+  ChevronDown,
+  Loader2
 } from 'lucide-react';
 
 interface EditMeshPanelProps {
@@ -115,6 +116,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
   const [decimateIterations, setDecimateIterations] = useState<number>(1);
   const [decimateAngle, setDecimateAngle] = useState<number>(15);
   const [mergeDist, setMergeDist] = useState<number>(0.001);
+  const [isMerging, setIsMerging] = useState<boolean>(false);
   const [isProcessingModifier, setIsProcessingModifier] = useState<boolean>(false);
 
   // Estados de apartados colapsables (minimizar secciones)
@@ -183,14 +185,24 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
     );
   }
 
-  const vertCount = obj.vertices?.length ?? obj.stats?.vertices ?? 0;
-  const faceCount = obj.faces?.length ?? obj.stats?.faces ?? 0;
-  const aristasCount = extractUniqueEdges(obj).length;
+  const vertCount = (obj.vertices && obj.vertices.length > 0)
+    ? obj.vertices.length
+    : (obj.stats?.vertices || (obj.meshData as any)?.verticesCount || 0);
+
+  const faceCount = (obj.faces && obj.faces.length > 0)
+    ? obj.faces.length
+    : (obj.stats?.faces || (obj.meshData as any)?.facesCount || 0);
+
+  const rawEdges = extractUniqueEdges(obj);
+  const aristasCount = rawEdges.length > 0
+    ? rawEdges.length
+    : (faceCount > 0 ? Math.round(faceCount * 1.5) : 0);
+
   const numEdges = Math.floor(selectedEdgeIndices.length / 2);
   const isShape = obj.type === 'SHAPE';
 
   return (
-    <div className="flex-1 flex flex-col overflow-y-auto bg-zinc-950 text-zinc-200 divide-y divide-zinc-900 select-none pb-8 text-[11px]">
+    <div className="flex-1 min-h-0 h-full flex flex-col overflow-y-auto overscroll-contain bg-zinc-950 text-zinc-200 divide-y divide-zinc-900 select-none pb-24 text-[11px] touch-pan-y">
       
       {/* ── Header: Resumen del Objeto y Modo ── */}
       <div className="p-3 bg-zinc-900/40 space-y-2">
@@ -227,6 +239,30 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
             </span>
           </div>
         </div>
+
+        {/* Banner para modelo importado que aún no ha extraído vértices editables */}
+        {Boolean(obj.meshData) && (!obj.vertices || obj.vertices.length === 0) && (
+          <div className="p-2 bg-indigo-950/60 border border-indigo-500/30 rounded-lg flex items-center justify-between gap-2">
+            <div>
+              <span className="text-[10px] font-semibold text-indigo-300 block">Modelo importado (FBX/GLTF)</span>
+              <span className="text-[9px] text-zinc-400">Puedes editarlo directamente o extraer su topología nativa</span>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+                const converted = await convertImportedToCSG(obj);
+                converted.meshData = undefined;
+                useStore.getState().updateObject(obj.id, converted);
+                useStore.getState().saveHistory('Extraer Malla Editable', 'edit');
+                showFeedback('Topología extraída y lista para edición de vértices');
+              }}
+              className="py-1 px-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-bold cursor-pointer transition-colors shadow-xs whitespace-nowrap"
+            >
+              ⚡ Extraer Vértices
+            </button>
+          </div>
+        )}
 
         {/* Feedback Message */}
         {actionFeedback && (
@@ -1388,31 +1424,81 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
         {sectionsOpen.cleanUp && (
           <div className="px-3 pb-3 space-y-2.5">
             {/* Fusionar por Distancia (Merge by Distance) */}
-            <div className="space-y-1.5 p-2 bg-zinc-900/70 rounded-lg border border-cyan-500/20">
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="text-zinc-300">Fusionar por Distancia:</span>
-                <span className="font-mono text-cyan-300 font-bold">{mergeDist}m</span>
+            <div className="space-y-2 p-2.5 bg-zinc-900/80 rounded-xl border border-cyan-500/30 shadow-inner">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-zinc-200 font-semibold flex items-center gap-1">
+                  <span className="text-cyan-400">🔗</span> Fusionar por Distancia:
+                </span>
+                <span className="font-mono text-cyan-300 font-bold bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-700/50 text-[10px]">
+                  {safeFixed(mergeDist * 1000, 2)} mm ({mergeDist}m)
+                </span>
               </div>
-              <input
-                type="range"
-                min="0.0002"
-                max="0.02"
-                step="0.0002"
-                value={mergeDist}
-                onChange={e => setMergeDist(parseFloat(e.target.value))}
-                className="w-full h-1 bg-zinc-700 rounded appearance-none cursor-pointer accent-cyan-500"
-              />
+
+              {/* Presets rápidos */}
+              <div className="grid grid-cols-4 gap-1">
+                {[
+                  { label: '0.1mm', val: 0.0001 },
+                  { label: '0.5mm', val: 0.0005 },
+                  { label: '1.0mm', val: 0.0010 },
+                  { label: '5.0mm', val: 0.0050 },
+                ].map(preset => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => setMergeDist(preset.val)}
+                    className={`py-1 px-1.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer border ${
+                      Math.abs(mergeDist - preset.val) < 0.00005
+                        ? 'bg-cyan-600 text-white border-cyan-400 shadow-xs'
+                        : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min="0.0001"
+                  max="0.02"
+                  step="0.0001"
+                  value={mergeDist}
+                  onChange={e => setMergeDist(parseFloat(e.target.value))}
+                  className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+                />
+              </div>
+
               <button
                 type="button"
+                disabled={isMerging}
                 onClick={async () => {
-                  const res = await mergeVerticesByDistanceAction(obj.id, mergeDist);
-                  showFeedback(res.message);
+                  setIsMerging(true);
+                  try {
+                    const res = await mergeVerticesByDistanceAction(obj.id, mergeDist);
+                    showFeedback(res.message);
+                  } finally {
+                    setIsMerging(false);
+                  }
                 }}
-                className="w-full py-1.5 bg-cyan-700 hover:bg-cyan-600 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer shadow-xs"
-                title="Fusiona automáticamente vértices que estén a una distancia menor a la tolerancia seleccionada"
+                className="w-full py-2 bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 disabled:opacity-50 text-white rounded-lg text-[11px] font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md border border-cyan-400/40 active:scale-[0.98]"
+                title="Fusiona automáticamente vértices que estén a una distancia menor a la tolerancia seleccionada y abre la ventana de informe"
               >
-                <span>🔗 Fusionar por Distancia (Merge by Distance)</span>
+                {isMerging ? (
+                  <>
+                    <Loader2 size={13} className="animate-spin text-white" />
+                    <span>Fusionando y analizando geometría...</span>
+                  </>
+                ) : (
+                  <>
+                    <Split size={13} className="rotate-180" />
+                    <span>Ejecutar Fusión por Distancia</span>
+                  </>
+                )}
               </button>
+              <div className="text-[9px] text-zinc-400 text-center">
+                Muestra la ventana de progreso y reporte de vértices optimizados.
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-1.5">

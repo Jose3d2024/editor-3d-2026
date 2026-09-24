@@ -32,33 +32,61 @@ function triangulate2D(points2D: { x: number; y: number }[]): [number, number, n
   const n = points2D.length;
   if (n < 3) return [];
   if (n === 3) return [[0, 1, 2]];
-  if (n === 4) {
-    // Quad rápido: comparar diagonales 0-2 y 1-3 para elegir la diagonal más corta y evitar triángulos estirados
-    const p0 = points2D[0], p1 = points2D[1], p2 = points2D[2], p3 = points2D[3];
-    const d02 = Math.hypot(p2.x - p0.x, p2.y - p0.y);
-    const d13 = Math.hypot(p3.x - p1.x, p3.y - p1.y);
-    if (d02 <= d13) {
-      return [[0, 1, 2], [0, 2, 3]];
-    } else {
-      return [[1, 2, 3], [1, 3, 0]];
-    }
-  }
 
-  // Utilizar el algoritmo canónico y robusto de Three.js (ShapeUtils.triangulateShape)
-  try {
-    const contour = points2D.map(p => new THREE.Vector2(p.x, p.y));
-    const shapeTris = THREE.ShapeUtils.triangulateShape(contour, []);
-    if (shapeTris && shapeTris.length > 0) {
-      return shapeTris as [number, number, number][];
-    }
-  } catch (_) {}
-
+  // Calcular área firmada para saber la orientación del polígono (CCW > 0)
   let signedArea = 0;
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n;
     signedArea += points2D[i].x * points2D[j].y - points2D[j].x * points2D[i].y;
   }
-  const isCCW = signedArea > 0;
+  const isCCW = signedArea >= 0;
+
+  if (n === 4) {
+    // Quad geométrico exacto: evaluar ambas diagonales (0-2 y 1-3)
+    const p0 = points2D[0], p1 = points2D[1], p2 = points2D[2], p3 = points2D[3];
+    const cross2D = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) =>
+      (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+
+    // Diagonal 0-2 es válida si p2 está entre p1 y p3 respecto a p0
+    const c0_12 = cross2D(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y);
+    const c0_23 = cross2D(p0.x, p0.y, p2.x, p2.y, p3.x, p3.y);
+    const diag02Valid = isCCW ? (c0_12 > 1e-9 && c0_23 > 1e-9) : (c0_12 < -1e-9 && c0_23 < -1e-9);
+
+    // Diagonal 1-3 es válida si p3 está entre p2 y p0 respecto a p1
+    const c1_23 = cross2D(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+    const c1_30 = cross2D(p1.x, p1.y, p3.x, p3.y, p0.x, p0.y);
+    const diag13Valid = isCCW ? (c1_23 > 1e-9 && c1_30 > 1e-9) : (c1_23 < -1e-9 && c1_30 < -1e-9);
+
+    const d02 = Math.hypot(p2.x - p0.x, p2.y - p0.y);
+    const d13 = Math.hypot(p3.x - p1.x, p3.y - p1.y);
+
+    let use02 = true;
+    if (diag02Valid && diag13Valid) {
+      use02 = d02 <= d13;
+    } else if (diag13Valid) {
+      use02 = false;
+    }
+
+    if (use02) {
+      return isCCW ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]];
+    } else {
+      return isCCW ? [[0, 1, 3], [1, 2, 3]] : [[0, 3, 1], [1, 3, 2]];
+    }
+  }
+
+  // Utilizar el algoritmo canónico de Three.js si es CCW
+  try {
+    const contour = (isCCW ? points2D : [...points2D].reverse()).map(p => new THREE.Vector2(p.x, p.y));
+    const shapeTris = THREE.ShapeUtils.triangulateShape(contour, []);
+    if (shapeTris && shapeTris.length > 0) {
+      if (isCCW) {
+        return shapeTris as [number, number, number][];
+      } else {
+        const revIdx = (idx: number) => n - 1 - idx;
+        return shapeTris.map(([a, b, c]) => [revIdx(a), revIdx(c), revIdx(b)]) as [number, number, number][];
+      }
+    }
+  } catch (_) {}
 
   const indices: number[] = Array.from({ length: n }, (_, i) => i);
   const tris: [number, number, number][] = [];
@@ -518,49 +546,99 @@ export function limitedDissolveGeometry(
     });
 
     // Las aristas perimetrales del N-gon son aquellas con conteo = 1 dentro del cluster
-    const nextMap = new Map<number, number>();
+    const adjOut = new Map<number, number[]>();
     directedEdges.forEach(e => {
       const undirectedKey = `${Math.min(e.from, e.to)}_${Math.max(e.from, e.to)}`;
       if (edgeCounts.get(undirectedKey) === 1) {
-        nextMap.set(e.from, e.to);
+        let list = adjOut.get(e.from);
+        if (!list) {
+          list = [];
+          adjOut.set(e.from, list);
+        }
+        list.push(e.to);
       }
     });
 
     // Reconstruir bucles cerrados (loops)
-    const visited = new Set<number>();
+    const visitedEdges = new Set<string>();
     const loops: number[][] = [];
 
-    nextMap.forEach((_, startVert) => {
-      if (visited.has(startVert)) return;
-      const loop: number[] = [];
-      let curr = startVert;
-      let loopOk = false;
+    adjOut.forEach((targets, startVert) => {
+      for (const initialTarget of targets) {
+        const initialEdgeKey = `${startVert}->${initialTarget}`;
+        if (visitedEdges.has(initialEdgeKey)) continue;
 
-      while (!visited.has(curr)) {
-        visited.add(curr);
-        loop.push(curr);
-        const nxt = nextMap.get(curr);
-        if (nxt === undefined) break;
-        if (nxt === startVert) {
-          loopOk = true;
-          break;
-        }
-        curr = nxt;
-      }
+        const loop: number[] = [startVert];
+        visitedEdges.add(initialEdgeKey);
+        let curr = initialTarget;
+        let prev = startVert;
+        let loopOk = false;
 
-      if (loopOk && loop.length >= 3) {
-        // Asegurar orden CCW respecto a la normal del cluster
-        let area2D = 0;
-        for (let i = 0; i < loop.length; i++) {
-          const j = (i + 1) % loop.length;
-          const p1 = vertVectors[loop[i]];
-          const p2 = vertVectors[loop[j]];
-          area2D += (p1.dot(U) * p2.dot(V) - p2.dot(U) * p1.dot(V));
+        const maxSteps = directedEdges.size + 10;
+        let steps = 0;
+
+        while (steps++ < maxSteps) {
+          if (curr === startVert) {
+            loopOk = true;
+            break;
+          }
+          loop.push(curr);
+
+          const nextCandidates = adjOut.get(curr);
+          if (!nextCandidates || nextCandidates.length === 0) break;
+
+          let chosenNext = -1;
+          if (nextCandidates.length === 1) {
+            chosenNext = nextCandidates[0];
+          } else {
+            // Si hay bifurcación en el mismo vértice, seleccionar el giro más hacia la izquierda (CCW)
+            const pPrev = vertVectors[prev];
+            const pCurr = vertVectors[curr];
+            const inUx = pCurr.dot(U) - pPrev.dot(U);
+            const inVy = pCurr.dot(V) - pPrev.dot(V);
+            const inAngle = Math.atan2(inVy, inUx);
+
+            let bestAngleDiff = -Infinity;
+            for (const cand of nextCandidates) {
+              const edgeK = `${curr}->${cand}`;
+              if (visitedEdges.has(edgeK) && cand !== startVert) continue;
+              const pCand = vertVectors[cand];
+              const outUx = pCand.dot(U) - pCurr.dot(U);
+              const outVy = pCand.dot(V) - pCurr.dot(V);
+              const outAngle = Math.atan2(outVy, outUx);
+              let diff = outAngle - inAngle;
+              while (diff <= -Math.PI) diff += 2 * Math.PI;
+              while (diff > Math.PI) diff -= 2 * Math.PI;
+              if (diff > bestAngleDiff) {
+                bestAngleDiff = diff;
+                chosenNext = cand;
+              }
+            }
+            if (chosenNext === -1) chosenNext = nextCandidates[0];
+          }
+
+          const chosenEdgeKey = `${curr}->${chosenNext}`;
+          if (visitedEdges.has(chosenEdgeKey)) break;
+          visitedEdges.add(chosenEdgeKey);
+
+          prev = curr;
+          curr = chosenNext;
         }
-        if (area2D < 0) {
-          loop.reverse();
+
+        if (loopOk && loop.length >= 3) {
+          // Asegurar orden CCW respecto a la normal del cluster
+          let area2D = 0;
+          for (let i = 0; i < loop.length; i++) {
+            const j = (i + 1) % loop.length;
+            const p1 = vertVectors[loop[i]];
+            const p2 = vertVectors[loop[j]];
+            area2D += (p1.dot(U) * p2.dot(V) - p2.dot(U) * p1.dot(V));
+          }
+          if (area2D < 0) {
+            loop.reverse();
+          }
+          loops.push(loop);
         }
-        loops.push(loop);
       }
     });
 

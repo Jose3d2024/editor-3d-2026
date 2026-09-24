@@ -6507,8 +6507,8 @@ const SceneManager: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-1 space-y-1">
+    <div className="flex-1 min-h-0 flex flex-col h-full overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-1 space-y-1 overscroll-contain">
         <Section title="Entorno e Iluminación" icon={<Globe size={14}/>}>
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-2">
@@ -8071,7 +8071,7 @@ export const PropertiesPanel: React.FC = () => {
   };
 
   return (
-    <div className="h-full bg-zinc-950 border-l border-zinc-800 flex flex-col overflow-hidden select-none">
+    <div className="h-full max-h-full flex-1 min-h-0 bg-zinc-950 border-l border-zinc-800 flex flex-col overflow-hidden select-none">
       
       {/* ── Tabs Superiores de Herramientas (Cuadrícula 3x2: Todos los nombres siempre visibles y accesibles) ─────────────────── */}
       <div className="border-b border-zinc-800/90 bg-zinc-950/90 p-1.5 shrink-0">
@@ -8165,27 +8165,28 @@ export const PropertiesPanel: React.FC = () => {
         </div>
       </div>
 
-      {activeTab === 'HISTORIAL' ? (
-        <HistoryPanel />
-      ) : activeTab === 'EDIT_MESH' ? (
-        <EditMeshPanel />
-      ) : activeTab === 'MATERIALS' ? (
-        <MaterialPanel />
-      ) : activeTab === 'SCENE' ? (
-        <SceneManager />
-      ) : activeTab === 'CONFIG' ? (
-        <ConfigPanel
-          onOpenShortcutsModal={(floating) => {
-            setShortcutsFloating(floating ?? false);
-            setShowShortcutsModal(true);
-          }}
-        />
-      ) : (
-        <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 min-h-0 h-full overflow-hidden flex flex-col">
+        {activeTab === 'HISTORIAL' ? (
+          <HistoryPanel />
+        ) : activeTab === 'EDIT_MESH' ? (
+          <EditMeshPanel />
+        ) : activeTab === 'MATERIALS' ? (
+          <MaterialPanel />
+        ) : activeTab === 'SCENE' ? (
+          <SceneManager />
+        ) : activeTab === 'CONFIG' ? (
+          <ConfigPanel
+            onOpenShortcutsModal={(floating) => {
+              setShortcutsFloating(floating ?? false);
+              setShowShortcutsModal(true);
+            }}
+          />
+        ) : (
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
           {/* ── Propiedades del objeto ─────────────────────────────────────────── */}
           {!obj ? (
-            <div className="flex-1 flex flex-col">
-              <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center text-zinc-600">
+            <div className="flex-1 min-h-0 flex flex-col overflow-y-auto overscroll-contain">
+              <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center text-zinc-600 p-4">
                 <Box size={24} className="opacity-20"/>
                 <p className="text-[10px] uppercase tracking-widest font-bold">Propiedades</p>
                 <p className="text-[10px] italic">Selecciona un objeto</p>
@@ -8243,7 +8244,7 @@ export const PropertiesPanel: React.FC = () => {
                 <UngroupHeaderButton obj={obj} />
               </div>
 
-              <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800">
+              <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800 overscroll-contain">
                 <Section title="Apariencia">
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] text-zinc-500 w-20">Color</span>
@@ -8366,6 +8367,7 @@ export const PropertiesPanel: React.FC = () => {
           )}
         </div>
       )}
+      </div>
 
       {/* ── Modal / Panel Flotante de Atajos de Teclado ── */}
       <KeyboardShortcutsModal

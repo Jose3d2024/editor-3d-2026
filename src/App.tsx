@@ -123,15 +123,15 @@ export default function App() {
           className={[
             'fixed inset-y-0 right-0 z-40',
             'transform transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]',
-            'lg:relative lg:translate-x-0 lg:inset-auto',
+            'lg:relative lg:translate-x-0 lg:inset-auto lg:h-full',
             isSidebarOpen ? 'translate-x-0' : 'translate-x-full',
             'w-80 sm:w-[360px] md:w-[375px] lg:w-[380px] xl:w-[410px]',
-            'flex flex-col overflow-hidden',
+            'flex flex-col h-full max-h-full overflow-hidden',
           ].join(' ')}
           style={{ background: 'var(--surface-1)' }}
         >
           {/* Mobile header */}
-          <div className="flex items-center justify-between px-3 py-2 border-b lg:hidden"
+          <div className="flex items-center justify-between px-3 py-2 border-b lg:hidden shrink-0"
                style={{ borderColor: 'var(--border)' }}>
             <span className="text-[10px] font-bold uppercase tracking-widest"
                   style={{ color: 'var(--text-muted)' }}>Propiedades</span>
@@ -143,7 +143,7 @@ export default function App() {
             </button>
           </div>
 
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 min-h-0 h-full overflow-hidden flex flex-col">
             <PropertiesPanel />
           </div>
         </aside>

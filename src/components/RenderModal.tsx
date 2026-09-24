@@ -235,10 +235,10 @@ function setupProjectLightsInScene(scene: THREE.Scene, projectLights: any[]) {
 
       if (light instanceof THREE.DirectionalLight || light instanceof THREE.SpotLight) {
         const target = new THREE.Object3D();
-        target.position.set(0, 0, -1);
-        light.add(target);
-        light.target = target;
+        const dir = new THREE.Vector3(0, 0, -1).applyEuler(light.rotation);
+        target.position.copy(light.position).add(dir);
         scene.add(target);
+        light.target = target;
       }
 
       light.castShadow = lData.castShadow ?? true;

@@ -307,9 +307,9 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
                 </span>
               </div>
               <p className="text-[10px] text-zinc-300 leading-relaxed">
-                Transforma el modelo en estética técnica azul facetada:
-                <strong> Decimate Low-Poly</strong> + <strong>Limited Dissolve</strong> + 
-                <strong> Aristas (&gt;20°)</strong>.
+                Renderiza el modelo con líneas de plano técnico CAD:
+                <strong> elimina líneas cruzadas y diagonales internas</strong>, resaltando únicamente las
+                <strong> aristas maestras de quiebre y silueta</strong>.
               </p>
               <button
                 type="button"
@@ -321,7 +321,7 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
                 className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-md transition-all active:scale-98"
               >
                 <Sparkles size={14} />
-                <span>Aplicar Estilo Blueprint al Modelo (1 Clic)</span>
+                <span>Aplicar Estilo Blueprint Limpio (1 Clic)</span>
               </button>
             </div>
           )}

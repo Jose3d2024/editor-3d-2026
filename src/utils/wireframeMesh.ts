@@ -16,8 +16,62 @@ export interface WireframeOptions {
 }
 
 /**
+ * Comprueba si dos segmentos en 3D (AB y CD) se cruzan internamente
+ * como las diagonales de un cuadrilátero convexo o curvo suave.
+ */
+export function doSegmentsCross3D(
+  pA: [number, number, number] | THREE.Vector3,
+  pB: [number, number, number] | THREE.Vector3,
+  pC: [number, number, number] | THREE.Vector3,
+  pD: [number, number, number] | THREE.Vector3
+): boolean {
+  const ax = Array.isArray(pA) ? pA[0] : pA.x;
+  const ay = Array.isArray(pA) ? pA[1] : pA.y;
+  const az = Array.isArray(pA) ? pA[2] : pA.z;
+
+  const bx = Array.isArray(pB) ? pB[0] : pB.x;
+  const by = Array.isArray(pB) ? pB[1] : pB.y;
+  const bz = Array.isArray(pB) ? pB[2] : pB.z;
+
+  const cx = Array.isArray(pC) ? pC[0] : pC.x;
+  const cy = Array.isArray(pC) ? pC[1] : pC.y;
+  const cz = Array.isArray(pC) ? pC[2] : pC.z;
+
+  const dx = Array.isArray(pD) ? pD[0] : pD.x;
+  const dy = Array.isArray(pD) ? pD[1] : pD.y;
+  const dz = Array.isArray(pD) ? pD[2] : pD.z;
+
+  const v1x = bx - ax, v1y = by - ay, v1z = bz - az;
+  const v2x = dx - cx, v2y = dy - cy, v2z = dz - cz;
+
+  const len1Sq = v1x * v1x + v1y * v1y + v1z * v1z;
+  const len2Sq = v2x * v2x + v2y * v2y + v2z * v2z;
+  if (len1Sq < 1e-12 || len2Sq < 1e-12) return false;
+
+  const dot12 = v1x * v2x + v1y * v2y + v1z * v2z;
+  const rx = ax - cx, ry = ay - cy, rz = az - cz;
+  const dot1r = v1x * rx + v1y * ry + v1z * rz;
+  const dot2r = v2x * rx + v2y * ry + v2z * rz;
+
+  const denom = len1Sq * len2Sq - dot12 * dot12;
+  if (Math.abs(denom) < 1e-10) return false;
+
+  const t = (dot12 * dot2r - len2Sq * dot1r) / denom;
+  const s = (len1Sq * dot2r - dot12 * dot1r) / denom;
+
+  if (t > 0.05 && t < 0.95 && s > 0.05 && s < 0.95) {
+    const p1x = ax + t * v1x, p1y = ay + t * v1y, p1z = az + t * v1z;
+    const p2x = cx + s * v2x, p2y = cy + s * v2y, p2z = cz + s * v2z;
+    const distSq = (p1x - p2x)**2 + (p1y - p2y)**2 + (p1z - p2z)**2;
+    return distSq <= Math.max(len1Sq, len2Sq) * 0.09;
+  }
+  return false;
+}
+
+/**
  * Extrae todas las aristas únicas de un objeto o geometría,
- * filtrando automáticamente aristas diagonales interiores entre caras coplanares.
+ * filtrando automáticamente aristas diagonales interiores entre triángulos coplanares
+ * y diagonales transversales que parten cuadriláteros en dos mitades.
  */
 export function extractUniqueEdges(
   obj: {
@@ -42,7 +96,7 @@ export function extractUniqueEdges(
   const dissolveCoplanars = options?.dissolveCoplanars ?? true;
   const coplanarAngleDeg = isSilhouette 
     ? Math.max(35.0, options?.coplanarAngleDeg ?? obj.creaseAngle ?? 35.0)
-    : (options?.coplanarAngleDeg ?? obj.creaseAngle ?? 15.0);
+    : (options?.coplanarAngleDeg ?? obj.creaseAngle ?? 18.0);
   const cosTol = Math.cos((coplanarAngleDeg * Math.PI) / 180);
 
   const rawVerts = obj.vertices || [];
@@ -61,7 +115,7 @@ export function extractUniqueEdges(
     Array.isArray(v) ? [v[0], v[1], v[2]] : [(v as any).x || 0, (v as any).y || 0, (v as any).z || 0]
   );
 
-  // Cuantización espacial adaptativa según Bounding Box para mallas importadas o nativas
+  // Cuantización espacial adaptativa según Bounding Box
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
   for (let i = 0; i < verts.length; i++) {
@@ -70,7 +124,7 @@ export function extractUniqueEdges(
     if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
   }
   const diag = Math.sqrt((maxX - minX)**2 + (maxY - minY)**2 + (maxZ - minZ)**2) || 1.0;
-  const quant = Math.max(100, Math.min(50000, Math.round(2000 / diag)));
+  const quant = Math.max(100, Math.min(50000, Math.round(2500 / diag)));
 
   const spatialMap = new Map<string, number>();
   const canonicalVertIdx: number[] = new Array(verts.length);
@@ -102,7 +156,7 @@ export function extractUniqueEdges(
   });
 
   // Agrupar aristas por pares de vértices canónicos espaciales
-  const edgeToFaces = new Map<string, { fIdx: number; origA: number; origB: number }[]>();
+  const edgeToFaces = new Map<string, { fIdx: number; origA: number; origB: number; canA: number; canB: number }[]>();
   for (let fIdx = 0; fIdx < faces.length; fIdx++) {
     const face = faces[fIdx];
     const idxs = (face.indices && face.indices.length > 0) ? face.indices : (Array.isArray(face) ? face : []);
@@ -122,14 +176,14 @@ export function extractUniqueEdges(
         list = [];
         edgeToFaces.set(key, list);
       }
-      list.push({ fIdx, origA, origB });
+      list.push({ fIdx, origA, origB, canA: minCan, canB: maxCan });
     }
   }
 
   const result: Array<[number, number]> = [];
 
   edgeToFaces.forEach(sharedList => {
-    const { origA, origB } = sharedList[0];
+    const { origA, origB, canA, canB } = sharedList[0];
 
     // Borde exterior libre (contorno de silueta)
     if (sharedList.length === 1) {
@@ -139,13 +193,40 @@ export function extractUniqueEdges(
 
     if (dissolveCoplanars) {
       if (sharedList.length === 2) {
-        const n0 = faceNormals[sharedList[0].fIdx];
-        const n1 = faceNormals[sharedList[1].fIdx];
+        const f0 = sharedList[0].fIdx;
+        const f1 = sharedList[1].fIdx;
+        const n0 = faceNormals[f0];
+        const n1 = faceNormals[f1];
         if (n0 && n1) {
           const dot = n0.dot(n1);
-          // Si el ángulo diedro es menor que coplanarAngleDeg, es coplanar o plano suave: ELIMINAR ARISTA
+          // 1. Omitir si es estrictamente coplanar (< coplanarAngleDeg)
           if (dot >= cosTol) {
             return;
+          }
+
+          // 2. Omitir DIAGONALES CRUZADAS INTERIORES QUE DIVIDEN QUADS O CARAS:
+          const face0 = faces[f0];
+          const face1 = faces[f1];
+          const idxs0 = (face0.indices && face0.indices.length > 0) ? face0.indices : (Array.isArray(face0) ? face0 : []);
+          const idxs1 = (face1.indices && face1.indices.length > 0) ? face1.indices : (Array.isArray(face1) ? face1 : []);
+
+          if (idxs0.length === 3 && idxs1.length === 3) {
+            // Localizar el tercer vértice en cada triángulo
+            const canC = idxs0.map(idx => canonicalVertIdx[idx] ?? idx).find(c => c !== canA && c !== canB);
+            const canD = idxs1.map(idx => canonicalVertIdx[idx] ?? idx).find(c => c !== canA && c !== canB);
+
+            if (canC !== undefined && canD !== undefined && canC !== canD) {
+              const maxQuadAngle = Math.max(35.0, coplanarAngleDeg);
+              const cosQuadTol = Math.cos((maxQuadAngle * Math.PI) / 180);
+              // Si el pliegue entre triángulos es suave/moderado (< 35°-45°)
+              if (dot >= cosQuadTol) {
+                const pA = verts[canA], pB = verts[canB], pC = verts[canC], pD = verts[canD];
+                if (pA && pB && pC && pD && doSegmentsCross3D(pA, pB, pC, pD)) {
+                  // Esta arista es la diagonal que cruza el cuadrilátero: ¡ELIMINARLA!
+                  return;
+                }
+              }
+            }
           }
         }
       } else if (sharedList.length > 2 && isSilhouette) {
@@ -172,9 +253,10 @@ export function extractUniqueEdges(
 }
 
 /**
- * Extrae aristas para BufferGeometry (ej. mallas GLTF/GLB importadas),
- * filtrando automáticamente aristas diagonales interiores entre triángulos coplanares.
- * Devuelve un BufferGeometry de LineSegments listo para renderizado limpio.
+ * Extrae aristas para BufferGeometry (ej. mallas GLTF/GLB/FBX importadas),
+ * filtrando rigurosamente aristas diagonales interiores entre triángulos coplanares
+ * y diagonales transversales que cruzan polígonos y cuadriláteros.
+ * Devuelve un BufferGeometry de LineSegments limpio sin líneas cruzadas.
  */
 export function extractEdgesFromBufferGeometry(
   geometry: THREE.BufferGeometry,
@@ -186,33 +268,19 @@ export function extractEdgesFromBufferGeometry(
   const isSilhouette = options?.silhouetteOnly ?? false;
   const coplanarAngleDeg = isSilhouette
     ? Math.max(35.0, options?.coplanarAngleDeg ?? 35.0)
-    : (options?.coplanarAngleDeg ?? 15.0);
+    : (options?.coplanarAngleDeg ?? 20.0);
   const cosTol = Math.cos((coplanarAngleDeg * Math.PI) / 180);
 
-  // Calcular dimensiones para tolerancia adaptativa de soldadura
   if (!geometry.boundingBox) geometry.computeBoundingBox();
   const box = geometry.boundingBox || new THREE.Box3().setFromBufferAttribute(posAttr as any);
   const diag = box.min.distanceTo(box.max) || 1.0;
-  const mergeTol = Math.max(1e-4, diag * 0.001);
-
-  // Intentar THREE.EdgesGeometry con vértices fusionados
-  try {
-    let cleanGeo = geometry;
-    try {
-      cleanGeo = BufferGeometryUtils.mergeVertices(geometry, mergeTol);
-    } catch (_) {}
-    const edgesGeo = new THREE.EdgesGeometry(cleanGeo, coplanarAngleDeg);
-    if (edgesGeo && edgesGeo.attributes.position && edgesGeo.attributes.position.count > 0) {
-      return edgesGeo;
-    }
-  } catch (_) {}
 
   const dissolveCoplanars = options?.dissolveCoplanars ?? true;
   const indexAttr = geometry.index;
   const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
 
-  // 1. Soldar vértices coincidentes por posición espacial con cuantización adaptativa
-  const quant = Math.max(100, Math.min(50000, Math.round(2000 / diag)));
+  // 1. Soldar vértices coincidentes por posición espacial con cuantización adaptativa de alta resolución
+  const quant = Math.max(200, Math.min(60000, Math.round(3000 / diag)));
   const keyMap = new Map<string, number>();
   const remap = new Int32Array(posAttr.count);
   const verts: THREE.Vector3[] = [];
@@ -276,11 +344,12 @@ export function extractEdgesFromBufferGeometry(
     }
   }
 
+  // Descartar aristas interiores coplanares y diagonales que cruzan quads
   const edgePositions: number[] = [];
   edgeToFaces.forEach((sharedList) => {
     const { va, vb } = sharedList[0];
 
-    // Borde exterior libre: silueta garantizada
+    // Borde exterior libre
     if (sharedList.length === 1) {
       const pA = verts[va], pB = verts[vb];
       if (pA && pB) edgePositions.push(pA.x, pA.y, pA.z, pB.x, pB.y, pB.z);
@@ -295,9 +364,27 @@ export function extractEdgesFromBufferGeometry(
         const n1 = faceNormals[f1];
         if (n0 && n1) {
           const dot = n0.dot(n1);
-          // Si el ángulo diedro entre caras contiguas es menor que coplanarAngleDeg, omitir diagonal coplanar
+          // 1. Omitir si es coplanar suave
           if (dot >= cosTol) {
             return;
+          }
+
+          // 2. Omitir DIAGONALES DE CUADRILÁTEROS (elimina líneas cruzadas dividiendo caras)
+          const tri0 = faces[f0];
+          const tri1 = faces[f1];
+          const vc = tri0[0] !== va && tri0[0] !== vb ? tri0[0] : (tri0[1] !== va && tri0[1] !== vb ? tri0[1] : tri0[2]);
+          const vd = tri1[0] !== va && tri1[0] !== vb ? tri1[0] : (tri1[1] !== va && tri1[1] !== vb ? tri1[1] : tri1[2]);
+
+          if (vc !== vd) {
+            const maxQuadAngle = Math.max(35.0, coplanarAngleDeg);
+            const cosQuadTol = Math.cos((maxQuadAngle * Math.PI) / 180);
+            if (dot >= cosQuadTol) {
+              const pA = verts[va], pB = verts[vb], pC = verts[vc], pD = verts[vd];
+              if (pA && pB && pC && pD && doSegmentsCross3D(pA, pB, pC, pD)) {
+                // Diagonal interna encontrada: no dibujarla para evitar líneas cruzadas
+                return;
+              }
+            }
           }
         }
       } else if (sharedList.length > 2 && isSilhouette) {

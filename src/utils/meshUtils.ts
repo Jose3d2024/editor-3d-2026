@@ -1365,6 +1365,21 @@ export function dissolveCoplanarFaces(
 
   const cosAngleTol = Math.cos((angleToleranceDeg * Math.PI) / 180);
 
+  // Mapeo canónico espacial para identificar aristas compartidas incluso con vértices desoldados
+  const quant = Math.max(200, Math.min(60000, Math.round(3000 / bboxDiag)));
+  const spatialMap = new Map<string, number>();
+  const canVert: number[] = new Array(vertices.length);
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    const key = `${Math.round(v[0] * quant)}_${Math.round(v[1] * quant)}_${Math.round(v[2] * quant)}`;
+    let c = spatialMap.get(key);
+    if (c === undefined) {
+      c = i;
+      spatialMap.set(key, c);
+    }
+    canVert[i] = c;
+  }
+
   // Compute normals, areas, and plane offsets for each triangle
   const fNormals: THREE.Vector3[] = [];
   const fAreas: number[] = [];
@@ -1398,13 +1413,16 @@ export function dissolveCoplanarFaces(
     });
   });
 
-  // Build edge-to-face adjacency map
+  // Build edge-to-face adjacency map utilizando índices canónicos espaciales
   const edgeToFaces = new Map<string, number[]>();
   triFaces.forEach(({ indices: [i0, i1, i2] }, fIdx) => {
+    const c0 = canVert[i0] ?? i0;
+    const c1 = canVert[i1] ?? i1;
+    const c2 = canVert[i2] ?? i2;
     const edges = [
-      i0 < i1 ? `${i0}_${i1}` : `${i1}_${i0}`,
-      i1 < i2 ? `${i1}_${i2}` : `${i2}_${i1}`,
-      i2 < i0 ? `${i2}_${i0}` : `${i0}_${i2}`,
+      c0 < c1 ? `${c0}_${c1}` : `${c1}_${c0}`,
+      c1 < c2 ? `${c1}_${c2}` : `${c2}_${c1}`,
+      c2 < c0 ? `${c2}_${c0}` : `${c0}_${c2}`,
     ];
     edges.forEach(k => {
       let list = edgeToFaces.get(k);
@@ -1686,12 +1704,16 @@ export function dissolveCoplanarFaces(
   clusters.forEach((faceIndices, root) => {
     if (faceIndices.length <= 1) return;
 
-    // Multi-triangle cluster: extract directed boundary edges
+    // Multi-triangle cluster: extract directed boundary edges using canonical spatial vertices
     const directedEdgeCount = new Map<string, { from: number; to: number; count: number }>();
     faceIndices.forEach(fi => {
       const [i0, i1, i2] = triFaces[fi].indices;
-      const triHalfEdges = [[i0, i1], [i1, i2], [i2, i0]];
+      const c0 = canVert[i0] ?? i0;
+      const c1 = canVert[i1] ?? i1;
+      const c2 = canVert[i2] ?? i2;
+      const triHalfEdges = [[c0, c1], [c1, c2], [c2, c0]];
       triHalfEdges.forEach(([u, v]) => {
+        if (u === v) return;
         const key = `${u}_${v}`;
         const existing = directedEdgeCount.get(key);
         if (existing) existing.count++;
@@ -2328,6 +2350,212 @@ export function collapseSelectedElements(
     vertices: clean.vertices,
     faces: clean.faces,
     report: [`${affected.size} elementos colapsados en su centroide común`]
+  };
+}
+
+/**
+ * Convierte pares de triángulos adyacentes coplanares o con curvatura suave en cuadriláteros limpios (Tris to Quads),
+ * disolviendo la diagonal interior para eliminar las líneas cruzadas que dividen polígonos y caras.
+ */
+export function convertTrisToQuads(
+  obj: CSGObject | { vertices: V3[]; faces: MeshFace[] },
+  maxAngleToleranceDeg: number = 32.0
+): { vertices: V3[]; faces: MeshFace[]; convertedQuads: number; report: string[] } {
+  const rawVerts = obj.vertices || [];
+  const inFaces = obj.faces || [];
+  if (rawVerts.length < 4 || inFaces.length < 2) {
+    return { vertices: rawVerts, faces: inFaces, convertedQuads: 0, report: ['Malla insuficiente para conversión'] };
+  }
+
+  const verts = rawVerts;
+  const cosTol = Math.cos((maxAngleToleranceDeg * Math.PI) / 180);
+
+  // Mapeo canónico espacial para identificar vértices compartidos en mallas desoldadas
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    if (v[0] < minX) minX = v[0]; if (v[1] < minY) minY = v[1]; if (v[2] < minZ) minZ = v[2];
+    if (v[0] > maxX) maxX = v[0]; if (v[1] > maxY) maxY = v[1]; if (v[2] > maxZ) maxZ = v[2];
+  }
+  const bboxDiag = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) || 1.0;
+  const quant = Math.max(200, Math.min(60000, Math.round(3000 / bboxDiag)));
+  const spatialMap = new Map<string, number>();
+  const canVert: number[] = new Array(verts.length);
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const key = `${Math.round(v[0] * quant)}_${Math.round(v[1] * quant)}_${Math.round(v[2] * quant)}`;
+    let c = spatialMap.get(key);
+    if (c === undefined) {
+      c = i;
+      spatialMap.set(key, c);
+    }
+    canVert[i] = c;
+  }
+
+  // Precalcular normales y áreas de triángulos
+  const faceNormals: (THREE.Vector3 | null)[] = [];
+  const triFaces: { origIdx: number; indices: [number, number, number]; mat?: number; uvs?: [number, number][] }[] = [];
+  const nonTriFaces: MeshFace[] = [];
+
+  for (let i = 0; i < inFaces.length; i++) {
+    const f = inFaces[i];
+    if (f.indices && f.indices.length === 3) {
+      const [i0, i1, i2] = f.indices;
+      const p0 = verts[i0], p1 = verts[i1], p2 = verts[i2];
+      if (p0 && p1 && p2) {
+        const v0 = new THREE.Vector3(...p0);
+        const v1 = new THREE.Vector3(...p1);
+        const v2 = new THREE.Vector3(...p2);
+        const norm = new THREE.Vector3().crossVectors(new THREE.Vector3().subVectors(v1, v0), new THREE.Vector3().subVectors(v2, v0));
+        if (norm.lengthSq() > 1e-12) norm.normalize(); else norm.set(0, 1, 0);
+        faceNormals.push(norm);
+        triFaces.push({ origIdx: i, indices: [i0, i1, i2], mat: f.materialIndex, uvs: f.uvs });
+        continue;
+      }
+    }
+    nonTriFaces.push(f);
+  }
+
+  // Agrupar aristas compartidas entre triángulos usando índices espaciales
+  const edgeMap = new Map<string, { triIdx: number; edgeOrder: [number, number]; oppVert: number }[]>();
+  for (let t = 0; t < triFaces.length; t++) {
+    const [i0, i1, i2] = triFaces[t].indices;
+    const triEdges: [number, number, number][] = [
+      [i0, i1, i2],
+      [i1, i2, i0],
+      [i2, i0, i1]
+    ];
+    for (const [va, vb, opp] of triEdges) {
+      const cA = canVert[va] ?? va;
+      const cB = canVert[vb] ?? vb;
+      if (cA === cB) continue;
+      const minV = Math.min(cA, cB);
+      const maxV = Math.max(cA, cB);
+      const k = `${minV}_${maxV}`;
+      let list = edgeMap.get(k);
+      if (!list) {
+        list = [];
+        edgeMap.set(k, list);
+      }
+      list.push({ triIdx: t, edgeOrder: [va, vb], oppVert: opp });
+    }
+  }
+
+  // Identificar candidatos a Quads y puntuarlos
+  interface CandidatePair {
+    tA: number;
+    tB: number;
+    quadIndices: [number, number, number, number];
+    score: number;
+    mat?: number;
+  }
+
+  const candidates: CandidatePair[] = [];
+
+  edgeMap.forEach((sharedList) => {
+    if (sharedList.length === 2) {
+      const { triIdx: tA, edgeOrder: [a1, b1], oppVert: oppA } = sharedList[0];
+      const { triIdx: tB, edgeOrder: [a2, b2], oppVert: oppB } = sharedList[1];
+
+      if (tA === tB || oppA === oppB) return;
+      if (triFaces[tA].mat !== triFaces[tB].mat) return;
+
+      const nA = faceNormals[tA];
+      const nB = faceNormals[tB];
+      if (!nA || !nB) return;
+
+      const dot = nA.dot(nB);
+      if (dot < cosTol) return;
+
+      const vA = a1;
+      const vB = b1;
+      const pA = verts[vA], pB = verts[vB], pC = verts[oppA], pD = verts[oppB];
+      if (!pA || !pB || !pC || !pD) return;
+
+      // Ordenar los 4 vértices para formar un ciclo continuo alrededor del perímetro del quad
+      // tA tiene vértices [vA, vB, oppA]. El orden perimetral desde oppA es oppA -> vA -> oppB -> vB
+      // Verificamos cuál orientación respeta la normal
+      const quadIndices: [number, number, number, number] = [oppA, vA, oppB, vB];
+
+      // Verificar convexidad del quad en su plano medio
+      const nAvg = new THREE.Vector3().addVectors(nA, nB).normalize();
+      const pOppA = new THREE.Vector3(...pC);
+      const pVA = new THREE.Vector3(...pA);
+      const pOppB = new THREE.Vector3(...pD);
+      const pVB = new THREE.Vector3(...pB);
+
+      const e0 = new THREE.Vector3().subVectors(pVA, pOppA);
+      const e1 = new THREE.Vector3().subVectors(pOppB, pVA);
+      const e2 = new THREE.Vector3().subVectors(pVB, pOppB);
+      const e3 = new THREE.Vector3().subVectors(pOppA, pVB);
+
+      const c0 = new THREE.Vector3().crossVectors(e0, e1).dot(nAvg);
+      const c1 = new THREE.Vector3().crossVectors(e1, e2).dot(nAvg);
+      const c2 = new THREE.Vector3().crossVectors(e2, e3).dot(nAvg);
+      const c3 = new THREE.Vector3().crossVectors(e3, e0).dot(nAvg);
+
+      const allPositive = c0 > 1e-6 && c1 > 1e-6 && c2 > 1e-6 && c3 > 1e-6;
+      const allNegative = c0 < -1e-6 && c1 < -1e-6 && c2 < -1e-6 && c3 < -1e-6;
+
+      if (!allPositive && !allNegative) {
+        // Cuadrilátero cóncavo o auto-intersecante: no unir
+        return;
+      }
+
+      const finalIndices: [number, number, number, number] = allPositive
+        ? [oppA, vA, oppB, vB]
+        : [oppA, vB, oppB, vA];
+
+      // Puntuación: mayor score para ángulos diedros más planos y quads más regulares
+      const score = dot * 2.0;
+      candidates.push({
+        tA,
+        tB,
+        quadIndices: finalIndices,
+        score,
+        mat: triFaces[tA].mat
+      });
+    }
+  });
+
+  // Ordenar candidatos por mejor calidad descendente
+  candidates.sort((a, b) => b.score - a.score);
+
+  const usedTriangles = new Uint8Array(triFaces.length);
+  const newQuadFaces: MeshFace[] = [];
+  let convertedCount = 0;
+
+  for (const cand of candidates) {
+    if (usedTriangles[cand.tA] === 0 && usedTriangles[cand.tB] === 0) {
+      usedTriangles[cand.tA] = 1;
+      usedTriangles[cand.tB] = 1;
+      newQuadFaces.push({
+        indices: cand.quadIndices,
+        materialIndex: cand.mat
+      });
+      convertedCount++;
+    }
+  }
+
+  // Conservar triángulos que no se pudieron unir en quads
+  const remainingTriFaces: MeshFace[] = [];
+  for (let t = 0; t < triFaces.length; t++) {
+    if (usedTriangles[t] === 0) {
+      remainingTriFaces.push(inFaces[triFaces[t].origIdx]);
+    }
+  }
+
+  const finalFaces: MeshFace[] = [...nonTriFaces, ...newQuadFaces, ...remainingTriFaces];
+
+  return {
+    vertices: verts,
+    faces: finalFaces,
+    convertedQuads: convertedCount,
+    report: [
+      `Convertidos ${convertedCount * 2} triángulos en ${convertedCount} cuadriláteros limpios`,
+      `Eliminadas ${convertedCount} diagonales cruzadas internas`
+    ]
   };
 }
 

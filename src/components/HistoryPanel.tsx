@@ -119,7 +119,7 @@ export const HistoryPanel: React.FC = () => {
   const canRedo = historySteps && historyIndex < historySteps.length - 1;
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-zinc-950 overflow-hidden select-none text-zinc-200">
+    <div className="flex-1 min-h-0 flex flex-col h-full bg-zinc-950 overflow-hidden select-none text-zinc-200">
       {/* ── Header ── */}
       <div className="p-3 border-b border-zinc-800 space-y-2.5 bg-zinc-900/40">
         <div className="flex items-center justify-between">
@@ -298,7 +298,7 @@ export const HistoryPanel: React.FC = () => {
       </div>
 
       {/* ── Steps Timeline List ── */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+      <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1 custom-scrollbar overscroll-contain">
         {filteredSteps.length === 0 ? (
           <div className="text-center py-12 text-zinc-500 text-xs space-y-1">
             <History size={28} className="mx-auto text-zinc-600 opacity-40 mb-2" />

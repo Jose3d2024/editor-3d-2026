@@ -329,7 +329,7 @@ export async function optimizeGLBModel(
             }
             // En mallas con texturas UV nunca ejecutamos simplifySloppy para evitar desgarrar las texturas
           } else {
-            // Mallas sin UVs: simplificación posicional estándar
+            // Mallas sin UVs: simplificación posicional estándar con topología limpia garantizada
             const flags = preserveCreases ? ['LockBorder'] : [];
             const attempts = options?.isCurved
               ? [
@@ -342,13 +342,16 @@ export async function optimizeGLBModel(
                   { err: 0.45,  flags: [] as any },
                 ]
               : [
-                  { err: 0.05, flags: flags as any },
-                  { err: 0.15, flags: flags as any },
+                  { err: 0.03, flags: flags as any },
+                  { err: 0.08, flags: flags as any },
+                  { err: 0.18, flags: flags as any },
                   { err: 0.35, flags: flags as any },
                   { err: 0.70, flags: flags as any },
+                  { err: 0.35, flags: [] as any },
+                  { err: 0.75, flags: [] as any },
                 ];
             if (!preserveCreases && !options?.isCurved) {
-              attempts.push({ err: 0.50, flags: [] as any });
+              attempts.push({ err: 0.90, flags: [] as any });
             }
 
             for (const att of attempts) {
@@ -367,16 +370,7 @@ export async function optimizeGLBModel(
                 }
               } catch (eSimp) {}
             }
-
-            // Evitar fallback sloppy en geometrías curvas para no destruir cilindros o cañones finos
-            if (!options?.isCurved && (!resultIndices || resultIndices.length === indexArray.length) && targetRatio <= 0.7) {
-              try {
-                const resSloppy = Meshopt.simplifySloppy(indexArray, posArray, 3, null, targetCount, 0.4);
-                if (resSloppy && resSloppy[0] && resSloppy[0].length >= 12 && resSloppy[0].length < indexArray.length) {
-                  resultIndices = resSloppy[0];
-                }
-              } catch (eSloppy) {}
-            }
+            // NUNCA usamos simplifySloppy para evitar el doblado caótico de caras y líneas cruzadas
           }
 
           if (resultIndices && resultIndices.length >= 12 && resultIndices.length < indexArray.length) {

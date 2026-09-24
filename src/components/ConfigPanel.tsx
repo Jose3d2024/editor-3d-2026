@@ -70,7 +70,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
   const totalMaterials = project.materials.length;
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-zinc-950 text-zinc-100 select-none">
+    <div className="flex-1 min-h-0 h-full flex flex-col overflow-hidden bg-zinc-950 text-zinc-100 select-none">
       {/* Configuration Header */}
       <div className="p-3 bg-zinc-900/60 border-b border-zinc-800 flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -84,7 +84,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-4 custom-scrollbar overscroll-contain">
 
         {/* ─── SECTION 1: ATAJOS DE TECLADO (HERO ACCENT) ─── */}
         <div className="p-3.5 rounded-2xl bg-gradient-to-b from-indigo-950/40 to-zinc-900/80 border border-indigo-500/30 space-y-3 shadow-lg shadow-indigo-950/20">
