@@ -23,17 +23,42 @@ export function findConnectedIslands(
   if (!faces || faces.length === 0) return [];
 
   const numFaces = faces.length;
+  const numVerts = vertices ? vertices.length : 0;
+
+  // Mapa de equivalencia espacial: conecta vértices con posiciones 3D idénticas
+  // para no fragmentar mallas con costuras UV o divisiones de normales
+  const canonicalVert = new Int32Array(numVerts);
+  const spatialMap = new Map<string, number>();
+  const precision = 10000; // Tolerancia de 0.1 mm (0.0001 unidades)
+
+  for (let i = 0; i < numVerts; i++) {
+    const v = vertices[i];
+    if (!v) {
+      canonicalVert[i] = i;
+      continue;
+    }
+    const key = `${Math.round(v[0] * precision)},${Math.round(v[1] * precision)},${Math.round(v[2] * precision)}`;
+    const existing = spatialMap.get(key);
+    if (existing !== undefined) {
+      canonicalVert[i] = existing;
+    } else {
+      spatialMap.set(key, i);
+      canonicalVert[i] = i;
+    }
+  }
+
   const vertToFaces = new Map<number, number[]>();
 
-  // Mapear cada vértice a las caras que lo contienen
+  // Mapear cada vértice canónico a las caras que lo contienen
   for (let fi = 0; fi < numFaces; fi++) {
     const indices = faces[fi].indices;
     for (let k = 0; k < indices.length; k++) {
       const vi = indices[k];
-      let list = vertToFaces.get(vi);
+      const canonVi = vi < numVerts ? canonicalVert[vi] : vi;
+      let list = vertToFaces.get(canonVi);
       if (!list) {
         list = [];
-        vertToFaces.set(vi, list);
+        vertToFaces.set(canonVi, list);
       }
       list.push(fi);
     }
@@ -56,7 +81,8 @@ export function findConnectedIslands(
       const indices = faces[curFace].indices;
       for (let k = 0; k < indices.length; k++) {
         const vi = indices[k];
-        const neighborFaces = vertToFaces.get(vi);
+        const canonVi = vi < numVerts ? canonicalVert[vi] : vi;
+        const neighborFaces = vertToFaces.get(canonVi);
         if (neighborFaces) {
           for (let n = 0; n < neighborFaces.length; n++) {
             const nf = neighborFaces[n];

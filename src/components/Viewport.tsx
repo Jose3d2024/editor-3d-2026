@@ -39,6 +39,7 @@ import { extractUniqueEdges, extractEdgesFromBufferGeometry } from '../utils/wir
 import { getLoopCutPreview } from '../utils/loopCut';
 import { safeFixed, safeNum } from '../utils/numberUtils';
 import { projectVerticesToFaces, snapPointToSurfaces, alignObjectRotationToNormal, getObjectBaseExtentAlongNormal } from '../utils/faceSnap';
+import { registerMeshes } from '../utils/meshRegistry';
 
 interface ViewportProps {
   type: ViewportType;
@@ -3558,6 +3559,14 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       pickMesh.userData.vertexMap = vertexMap;
       primitivesGroup.add(pickMesh);
     });
+
+    if (type === 'PERSPECTIVE') {
+      project.objects.forEach(obj => {
+        const meshes = getAllObjectMeshes(obj.id);
+        registerMeshes(obj.id, meshes);
+      });
+    }
+
     const handleDirectDispose = (e: Event) => {
       const customEvt = e as CustomEvent<{ id?: string; ids?: string[] }>;
       const targetIds = customEvt.detail?.ids || (customEvt.detail?.id ? [customEvt.detail.id] : []);

@@ -35,6 +35,7 @@ import {
   Loader2,
   Keyboard
 } from 'lucide-react';
+import { BotonRetopologia } from './BotonRetopologia';
 
 interface EditMeshPanelProps {
   object?: CSGObject | null;
@@ -1461,6 +1462,9 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
             </button>
           </div>
         </div>
+
+        {/* ── PANEL AVANZADO DE OPTIMIZACIÓN DE SILUETA (PRESETS + HEURÍSTICA + BVH) ── */}
+        <BotonRetopologia />
       </div>
     )}
   </div>
