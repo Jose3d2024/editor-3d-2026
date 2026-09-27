@@ -4,7 +4,7 @@ import { createORMMap } from '../utils/materialUtils';
 import { AppState, Project, CSGObject, CSGOperation, PrimitiveType, ViewportType, ReferenceImage, MeshFace, V3, BezierHandle, SilhouetteState, ViewMode, MaterialData, CameraState, LightType, LightObject, CameraObject, TransformMode, NurbsCurveData, NurbsSurfaceData, HistoryStep } from '../types';
 import { generatePrimitive } from '../utils/geometry';
 import { createBaseGeometry } from '../utils/csg';
-import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces } from '../utils/modifiers';
+import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces, fromThreeGeometry } from '../utils/modifiers';
 import { bevelMeshAdvanced } from '../utils/bevel';
 import { simplifyMesh, convertImportedToCSG } from '../utils/modifiers_advanced';
 import { applyNoiseToMesh, type NoiseDeformConfig } from '../utils/meshNoise';
@@ -357,17 +357,17 @@ interface Store extends AppState {
   retopologizeObject: (id: string, options?: import('../utils/retopology').RetopologyOptions & { selectedMeshes?: string[]; convertToNative?: boolean }) => Promise<void>;
   convertMeshToQuadsObject: (id: string, options?: { preserveCreases?: boolean; creaseAngleDeg?: number }) => Promise<void>;
   repairHardSurfaceObject: (id: string, options?: { creaseAngleDeg?: number; planarToleranceDeg?: number }) => Promise<void>;
-  dissolveCoplanarObject: (id: string, angleToleranceDeg?: number, options?: { selectedMeshes?: string[]; protectUVSeams?: boolean; snapToPlane?: boolean; collinearAngleDeg?: number }) => Promise<void>;
+  dissolveCoplanarObject: (id: string, angleToleranceDeg?: number, options?: { selectedMeshes?: string[]; protectUVSeams?: boolean; snapToPlane?: boolean; collinearAngleDeg?: number }) => Promise<{ success: boolean; message: string }>;
   applyLowPolyBlueprint: (id: string, options?: { creaseAngleDeg?: number; targetFaceRatio?: number; silhouetteOnly?: boolean; forceNativeConversion?: boolean }) => Promise<{ success: boolean; message: string }>;
   removeBlueprintStyle: (id: string) => void;
   optimizeCurvedObject: (id: string, ratio?: number, options?: { preserveCreases?: boolean; creaseAngleDeg?: number; smoothNormals?: boolean; selectedMeshes?: string[] }) => Promise<void>;
-  cleanIslandsObject: (id: string, minRatio?: number) => Promise<void>;
+  cleanIslandsObject: (id: string, minRatio?: number) => Promise<{ success: boolean; message: string }>;
   repairNormalsObject: (id: string, options?: { creaseAngleDeg?: number; snapPlanar?: boolean; flipAll?: boolean }) => Promise<void>;
   flipObjectNormals: (id: string) => Promise<void>;
   offsetObject: (id: string, distance: number) => Promise<void>;
   repairObject: (id: string, tolerance?: number) => Promise<void>;
   weldObject: (id: string, tolerance?: number) => Promise<void>;
-  healObject: (id: string) => Promise<void>;
+  healObject: (id: string) => Promise<{ success: boolean; message: string }>;
   fillHolesObject: (id: string) => Promise<void>;
   separateLoosePartsObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
   ungroupSelectedObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
@@ -404,7 +404,7 @@ interface Store extends AppState {
   connectVertices: (id: string, vertexIndices?: number[]) => { success: boolean; message: string };
   createFaceFromVertices: (id: string, vertexIndices?: number[]) => { success: boolean; message: string };
   extrudeSelectedVertices: (id: string, vertexIndices?: number[], offset?: V3) => { success: boolean; message: string };
-  deleteSelectedVertices: (id: string, vertexIndices?: number[]) => { success: boolean; message: string };
+  deleteSelectedVertices: (id: string, vertexIndices?: number[]) => Promise<{ success: boolean; message: string }>;
   symmetrizeVertices: (
     id: string,
     vertexIndices?: number[],
@@ -420,12 +420,12 @@ interface Store extends AppState {
   reverseShapeDirection: (id: string) => void;
 
   // Face & Edge Tools
-  deleteSelectedFaces: (id: string, faceIndices?: number[]) => { success: boolean; message: string };
+  deleteSelectedFaces: (id: string, faceIndices?: number[]) => Promise<{ success: boolean; message: string }>;
   removeAllFaces: (id: string) => { success: boolean; message: string };
   convertToWireframe: (id: string, options?: WireframeOptions) => { success: boolean; message: string; newObjectId?: string };
   insetFaces: (id: string, faceIndices?: number[], amount?: number) => { success: boolean; message: string };
   flipSelectedFaceNormals: (id: string, faceIndices?: number[]) => { success: boolean; message: string };
-  deleteSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
+  deleteSelectedEdges: (id: string, edgeIndices?: number[]) => Promise<{ success: boolean; message: string }>;
   dissolveSelectedEdges: (id: string, edgeIndices?: number[]) => Promise<{ success: boolean; message: string }> | { success: boolean; message: string };
   dissolveSelectedVerticesAction: (id: string, vertexIndices?: number[]) => Promise<{ success: boolean; message: string }>;
   dissolveSelectedFacesAction: (id: string, faceIndices?: number[]) => Promise<{ success: boolean; message: string }>;
@@ -525,10 +525,15 @@ export const useStore = create<Store>()((set, get) => ({
   selectedObjectId: null,
   selectedObjectIds: [] as string[],
   currentTime: 0,
+  setCurrentTime: (time) => set({ currentTime: time }),
   isPlaying: false,
+  setIsPlaying: (isPlaying) => set({ isPlaying }),
   isScrubbing: false,
+  setIsScrubbing: (isScrubbing) => set({ isScrubbing }),
   isRecording: false,
+  setIsRecording: (isRecording) => set({ isRecording }),
   viewMode: 'SOLID',
+  setViewMode: (mode) => set({ viewMode: mode }),
   showCSG: false,
   gridSnapEnabled: false,
   faceSnapConfig: {
@@ -539,10 +544,72 @@ export const useStore = create<Store>()((set, get) => ({
     targetObjectId: null,
   },
   editMode: 'OBJECT',
+  setEditMode: async (mode) => {
+    const { project, selectedObjectId, editMode: currentMode } = get();
+    if (mode === currentMode) return;
+
+    if (mode !== 'OBJECT' && selectedObjectId) {
+      const obj = project.objects.find(o => o.id === selectedObjectId);
+      if (obj) {
+        // If the object is an imported model (GLTF/OBJ/STL) and doesn't have vertices/faces in store,
+        // extract/convert it so edit mode operates on the actual model geometry
+        if (obj.meshData) {
+          try {
+            const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+            const converted = await convertImportedToCSG(obj);
+            if (converted && converted.vertices && converted.vertices.length > 0) {
+              get().updateObject(selectedObjectId, {
+                type: 'MESH',
+                parameters: {},
+                meshData: undefined,
+                vertices: converted.vertices,
+                faces: converted.faces,
+                vertexOffsets: {},
+                stats: { vertices: converted.vertices.length, faces: converted.faces.length }
+              });
+            }
+          } catch (e) {
+            console.error('Error convirtiendo modelo importado para edición:', e);
+          }
+        } else if ((!obj.vertices || obj.vertices.length === 0 || !obj.faces || obj.faces.length === 0) && obj.type !== 'SHAPE') {
+          // If it's a primitive without baked vertices/faces, bake them
+          try {
+            const { fromThreeGeometry } = await import('../utils/modifiers');
+            const { createBaseGeometry } = await import('../utils/csg');
+            const geo = createBaseGeometry(obj);
+            const res = fromThreeGeometry(geo);
+            if (res.vertices && res.vertices.length > 0) {
+              get().updateObject(selectedObjectId, {
+                type: 'MESH',
+                parameters: {},
+                vertices: res.vertices,
+                faces: res.faces,
+                vertexOffsets: {},
+                stats: { vertices: res.vertices.length, faces: res.faces.length }
+              });
+            }
+          } catch (e) {
+            console.error('Error horneando primitiva para edición:', e);
+          }
+        }
+      }
+    }
+
+    set({
+      editMode: mode,
+      selectedVertexIndices: [],
+      selectedFaceIndices: [],
+      selectedEdgeIndices: [],
+    });
+  },
   transformMode: 'universal',
+  setTransformMode: (mode) => set({ transformMode: mode }),
   transformSpace: 'world',
+  setTransformSpace: (space) => set({ transformSpace: space }),
   drawMode: null,
+  setDrawMode: (mode) => set({ drawMode: mode }),
   drawColor: '#ffffff',
+  setDrawColor: (color) => set({ drawColor: color }),
   orthoDrawMode: false,
   setOrthoDrawMode: (enabled) => set({ orthoDrawMode: enabled }),
   drawLockAxis: 'FREE',
@@ -3472,7 +3539,7 @@ export const useStore = create<Store>()((set, get) => ({
   dissolveCoplanarObject: async (id, angleToleranceDeg = 5.0, options?: { selectedMeshes?: string[]; protectUVSeams?: boolean; snapToPlane?: boolean; collinearAngleDeg?: number }) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
-    if (!obj) return;
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
 
     const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
     const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
@@ -3492,6 +3559,7 @@ export const useStore = create<Store>()((set, get) => ({
 
     try {
       let updatedObj = obj;
+      let outcomeMsg = 'Superficies planas verificadas.';
 
       if (obj.meshData && obj.meshData.type === 'gltf') {
         const { dissolveCoplanarGLBModel } = await import('../utils/glb_processor');
@@ -3507,9 +3575,13 @@ export const useStore = create<Store>()((set, get) => ({
           options
         );
       } else {
-        if (obj.meshData) obj = await convertImportedToCSG(obj);
-        if (!obj.vertices || obj.vertices.length === 0) {
+        if (obj.meshData) {
+          const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+          obj = await convertImportedToCSG(obj);
+        }
+        if (!obj.vertices || obj.vertices.length === 0 || !obj.faces || obj.faces.length === 0) {
           const { fromThreeGeometry } = await import('../utils/modifiers');
+          const { createBaseGeometry } = await import('../utils/csg');
           const geo = createBaseGeometry(obj);
           const res = fromThreeGeometry(geo);
           obj = {
@@ -3519,9 +3591,10 @@ export const useStore = create<Store>()((set, get) => ({
           };
         }
         const { dissolveCoplanarFaces } = await import('../utils/meshUtils');
-        const result = dissolveCoplanarFaces(obj, angleToleranceDeg);
+        const result = dissolveCoplanarFaces(obj, angleToleranceDeg, options);
 
         let finalFaces = result.faces;
+        outcomeMsg = result.report?.join(' · ') || 'Fusión coplanar completada';
 
         updatedObj = {
           ...obj,
@@ -3539,7 +3612,7 @@ export const useStore = create<Store>()((set, get) => ({
           meshProcessing: s.meshProcessing ? {
             ...s.meshProcessing,
             progress: 100,
-            subtitle: `¡Fusión coplanar completada! (${result.report.join(' · ')})`,
+            subtitle: `¡Fusión coplanar completada! (${outcomeMsg})`,
             completed: true,
             finalVertCount: result.vertices.length,
             finalFaceCount: result.faces.length,
@@ -3548,24 +3621,28 @@ export const useStore = create<Store>()((set, get) => ({
       }
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+      set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
       get().saveHistory('Disolver Caras Coplanares', 'edit');
 
       if (obj.meshData && obj.meshData.type === 'gltf') {
         const finalVerts = updatedObj.stats?.vertices ?? initialVerts;
         const finalFaces = updatedObj.stats?.faces ?? initialFaces;
         const vDiff = initialFaces > 0 ? Math.round(((initialFaces - finalFaces) / initialFaces) * 100) : 0;
+        outcomeMsg = `${initialFaces.toLocaleString()} → ${finalFaces.toLocaleString()} caras ${vDiff > 0 ? `· -${vDiff}%` : '· Estructura coplanar verificada'}`;
         set(s => ({
           meshProcessing: s.meshProcessing ? {
             ...s.meshProcessing,
             progress: 100,
-            subtitle: `¡Superficies planas optimizadas! (${initialFaces.toLocaleString()} → ${finalFaces.toLocaleString()} caras ${vDiff > 0 ? `· -${vDiff}%` : '· Estructura coplanar verificada'})`,
+            subtitle: `¡Superficies planas optimizadas! (${outcomeMsg})`,
             completed: true,
             finalVertCount: finalVerts,
             finalFaceCount: finalFaces,
           } : null
         }));
       }
-    } catch (e) {
+
+      return { success: true, message: outcomeMsg };
+    } catch (e: any) {
       console.error('Error disolviendo caras coplanares:', e);
       set(s => ({
         meshProcessing: s.meshProcessing ? {
@@ -3577,6 +3654,7 @@ export const useStore = create<Store>()((set, get) => ({
           finalFaceCount: initialFaces,
         } : null
       }));
+      return { success: false, message: `Error en Limited Dissolve: ${e?.message || e}` };
     }
   },
 
@@ -4138,7 +4216,7 @@ export const useStore = create<Store>()((set, get) => ({
   cleanIslandsObject: async (id, minRatio = 0.05) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
-    if (!obj) return;
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
 
     const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
     const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
@@ -4171,24 +4249,31 @@ export const useStore = create<Store>()((set, get) => ({
         );
         const updatedObj = res.object;
         set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-        get().saveHistory();
+        set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
+        get().saveHistory('Limpieza de Islas 3D', 'edit');
 
+        const outcomeMsg = res.report.join(', ');
         set(s => ({
           meshProcessing: s.meshProcessing ? {
             ...s.meshProcessing,
             progress: 100,
-            subtitle: `¡Limpieza de islas 3D finalizada! (${res.report.join(', ')})`,
+            subtitle: `¡Limpieza de islas 3D finalizada! (${outcomeMsg})`,
             completed: true,
             finalVertCount: updatedObj.stats?.vertices ?? 0,
             finalFaceCount: updatedObj.stats?.faces ?? 0,
           } : null
         }));
-        return;
+        return { success: true, message: outcomeMsg };
       }
 
-      // 2. Para mallas nativas CSG:
-      if (!obj.vertices || obj.vertices.length === 0) {
+      // 2. Para mallas nativas CSG o formatos STL/OBJ:
+      if (obj.meshData) {
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      }
+      if (!obj.vertices || obj.vertices.length === 0 || !obj.faces || obj.faces.length === 0) {
         const { fromThreeGeometry } = await import('../utils/modifiers');
+        const { createBaseGeometry } = await import('../utils/csg');
         const geo = createBaseGeometry(obj);
         const res = fromThreeGeometry(geo);
         obj = {
@@ -4213,21 +4298,25 @@ export const useStore = create<Store>()((set, get) => ({
       };
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-      get().saveHistory();
+      set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
+      get().saveHistory('Limpieza de Islas 3D', 'edit');
 
+      const outcomeMsg = result.report.join(', ');
       set(s => ({
         meshProcessing: s.meshProcessing ? {
           ...s.meshProcessing,
           progress: 100,
-          subtitle: `¡Limpieza de islas 3D finalizada! (${result.report.join(', ')})`,
+          subtitle: `¡Limpieza de islas 3D finalizada! (${outcomeMsg})`,
           completed: true,
           finalVertCount: result.vertices.length,
           finalFaceCount: result.faces.length,
         } : null
       }));
-    } catch (e) {
+      return { success: true, message: outcomeMsg };
+    } catch (e: any) {
       console.error('Error limpiando islas 3D:', e);
       set({ meshProcessing: null });
+      return { success: false, message: `Error en limpieza de islas: ${e?.message || e}` };
     }
   },
 
@@ -4941,11 +5030,28 @@ export const useStore = create<Store>()((set, get) => ({
     return { success: true, message: `Vértice insertado en la arista.` };
   },
 
-  deleteSelectedVertices: (id: string, vertexIndices?: number[]) => {
+  deleteSelectedVertices: async (id: string, vertexIndices?: number[]) => {
     const { project, selectedVertexIndices } = get();
-    const obj = project.objects.find(o => o.id === id);
-    if (!obj || !obj.vertices) {
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) {
       return { success: false, message: 'Objeto no encontrado.' };
+    }
+
+    if (!obj.vertices || obj.vertices.length === 0) {
+      if (obj.meshData) {
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      } else {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const { createBaseGeometry } = await import('../utils/csg');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      }
+    }
+
+    if (!obj.vertices || obj.vertices.length === 0) {
+      return { success: false, message: 'No se encontraron vértices editables en este objeto.' };
     }
 
     const indicesToDelete = vertexIndices && vertexIndices.length > 0 ? vertexIndices : selectedVertexIndices;
@@ -4953,7 +5059,7 @@ export const useStore = create<Store>()((set, get) => ({
       return { success: false, message: 'No hay vértices seleccionados para eliminar.' };
     }
 
-    const toRemove = new Set(indicesToDelete.filter(i => i < 10000));
+    const toRemove = new Set(indicesToDelete);
     if (toRemove.size === 0) {
       return { success: false, message: 'Selecciona al menos un punto de control / vértice.' };
     }
@@ -4982,8 +5088,8 @@ export const useStore = create<Store>()((set, get) => ({
         vertexOffsets: newOffsets,
         bezierHandles: newHandles,
       });
-      set({ selectedVertexIndices: [] });
-      get().saveHistory();
+      set({ selectedVertexIndices: [], selectedFaceIndices: [], selectedEdgeIndices: [] });
+      get().saveHistory('Eliminar Vértices', 'edit');
       return { success: true, message: `${toRemove.size} vértice(s) eliminado(s).` };
     } else {
       // Mesh vertex deletion
@@ -4999,7 +5105,7 @@ export const useStore = create<Store>()((set, get) => ({
       }
 
       const newFaces: MeshFace[] = [];
-      for (const f of obj.faces) {
+      for (const f of (obj.faces || [])) {
         if (!f || !f.indices) continue;
         const hasDeleted = f.indices.some(idx => toRemove.has(idx));
         if (!hasDeleted) {
@@ -5013,12 +5119,16 @@ export const useStore = create<Store>()((set, get) => ({
       }
 
       get().updateObject(id, {
+        type: 'MESH',
+        parameters: {},
+        meshData: undefined,
         vertices: newVerts,
         faces: newFaces,
         vertexOffsets: {},
+        stats: { vertices: newVerts.length, faces: newFaces.length }
       });
-      set({ selectedVertexIndices: [] });
-      get().saveHistory();
+      set({ selectedVertexIndices: [], selectedFaceIndices: [], selectedEdgeIndices: [] });
+      get().saveHistory('Eliminar Vértices', 'edit');
       return { success: true, message: `${toRemove.size} vértice(s) eliminado(s).` };
     }
   },
@@ -5241,23 +5351,30 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   // ── Face & Edge Tools ──────────────────────────────────────────────────────
-  deleteSelectedFaces: (id: string, faceIndices?: number[]) => {
+  deleteSelectedFaces: async (id: string, faceIndices?: number[]) => {
     const { project, selectedFaceIndices } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return { success: false, message: 'Objeto no encontrado.' };
 
     if (!obj.faces || obj.faces.length === 0) {
       if (obj.meshData) {
-        return { success: false, message: 'Pulsa "Extraer Vértices" en la parte superior para editar caras de este modelo importado.' };
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      } else {
+        try {
+          const { fromThreeGeometry } = await import('../utils/modifiers');
+          const { createBaseGeometry } = await import('../utils/csg');
+          const geo = createBaseGeometry(obj);
+          const res = fromThreeGeometry(geo);
+          obj = { ...obj, vertices: res.vertices, faces: res.faces };
+        } catch {
+          return { success: false, message: 'Objeto sin caras editables.' };
+        }
       }
-      try {
-        const geo = createBaseGeometry(obj);
-        const { fromThreeGeometry } = require('../utils/modifiers');
-        const res = fromThreeGeometry(geo);
-        obj = { ...obj, vertices: res.vertices, faces: res.faces };
-      } catch {
-        return { success: false, message: 'Objeto sin caras editables.' };
-      }
+    }
+
+    if (!obj.faces || obj.faces.length === 0) {
+      return { success: false, message: 'El objeto no contiene caras para eliminar.' };
     }
 
     const toDelete = faceIndices && faceIndices.length > 0 ? faceIndices : selectedFaceIndices;
@@ -5281,6 +5398,8 @@ export const useStore = create<Store>()((set, get) => ({
       });
 
       get().updateObject(id, {
+        type: 'MESH',
+        parameters: {},
         meshData: undefined,
         vertices: bakedVerts,
         faces: [],
@@ -5290,7 +5409,7 @@ export const useStore = create<Store>()((set, get) => ({
         stats: { vertices: bakedVerts.length, faces: 0 }
       });
       set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
-      get().saveHistory();
+      get().saveHistory('Eliminar Caras', 'edit');
       return { success: true, message: `Todas las caras eliminadas. Objeto convertido a Estructura Alámbrica.` };
     }
 
@@ -5313,14 +5432,16 @@ export const useStore = create<Store>()((set, get) => ({
     }));
 
     get().updateObject(id, {
+      type: 'MESH',
+      parameters: {},
       meshData: undefined,
       vertices: newVerts,
       faces: remappedFaces,
       vertexOffsets: {},
       stats: { vertices: newVerts.length, faces: remappedFaces.length }
     });
-    set({ selectedFaceIndices: [], selectedVertexIndices: [] });
-    get().saveHistory();
+    set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
+    get().saveHistory('Eliminar Caras', 'edit');
     return { success: true, message: `${toRemove.size} cara(s) eliminada(s). Topología actualizada.` };
   },
 
@@ -6291,7 +6412,7 @@ export const useStore = create<Store>()((set, get) => ({
     return { success: false, message: 'Cambia a Modo Caras o Vértices para invertir la selección.' };
   },
 
-  deleteSelectedEdges: (id: string, edgeIndices?: number[]) => {
+  deleteSelectedEdges: async (id: string, edgeIndices?: number[]) => {
     const { project, selectedEdgeIndices } = get();
     const obj = project.objects.find(o => o.id === id);
     if (!obj) return { success: false, message: 'Objeto no encontrado.' };
@@ -6300,7 +6421,7 @@ export const useStore = create<Store>()((set, get) => ({
     if (!edges || edges.length < 2) return { success: false, message: 'Selecciona al menos un borde.' };
 
     if (obj.type === 'SHAPE') {
-      return get().deleteSelectedVertices(id, [edges[0], edges[1]]);
+      return await get().deleteSelectedVertices(id, [edges[0], edges[1]]);
     }
 
     if (!obj.faces) return { success: false, message: 'No hay caras asociadas.' };
@@ -6522,7 +6643,7 @@ export const useStore = create<Store>()((set, get) => ({
   healObject: async (id) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
-    if (!obj) return;
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
 
     const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
     const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
@@ -6542,6 +6663,10 @@ export const useStore = create<Store>()((set, get) => ({
 
     try {
       if (obj.meshData) obj = await convertImportedToCSG(obj);
+      if (!obj.vertices || obj.vertices.length === 0) {
+        set({ meshProcessing: null });
+        return { success: false, message: 'No se pudieron extraer vértices para curado.' };
+      }
       const { healMesh } = await import('../utils/manifoldUtils');
       const result = await healMesh(obj.vertices, obj.faces);
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } } : o)}});
@@ -6557,9 +6682,11 @@ export const useStore = create<Store>()((set, get) => ({
           finalFaceCount: result.faces.length,
         } : null
       }));
-    } catch (e) {
+      return { success: true, message: '¡Curado topológico Manifold completado!' };
+    } catch (e: any) {
       console.error('Manifold heal failed', e);
       set({ meshProcessing: null });
+      return { success: false, message: `Error en curado: ${e?.message || e}` };
     }
   },
 
@@ -6969,30 +7096,6 @@ export const useStore = create<Store>()((set, get) => ({
     });
     get().saveHistory();
   },
-
-  setCurrentTime: (time) => set({ currentTime: time }),
-  setIsPlaying:   (v)    => set({ isPlaying: v }),
-  setIsScrubbing: (v)    => set({ isScrubbing: v }),
-  setIsRecording: (v)    => set({ isRecording: v }),
-  setViewMode:    (mode) => set({ viewMode: mode }),
-  setEditMode: async (mode) => {
-    if (mode !== 'OBJECT') {
-      const { project, selectedObjectId } = get();
-      if (selectedObjectId) {
-        let obj = project.objects.find(o => o.id === selectedObjectId);
-        if (obj && obj.meshData) {
-          obj = await convertImportedToCSG(obj);
-          obj.meshData = undefined;
-          get().updateObject(obj.id, obj);
-        }
-      }
-    }
-    set({ editMode: mode, selectedVertexIndices: [], selectedFaceIndices: [], selectedEdgeIndices: [] });
-  },
-  setTransformMode:  (mode)  => set({ transformMode: mode }),
-  setTransformSpace: (space) => set({ transformSpace: space }),
-  setDrawMode:       (mode)  => set({ drawMode: mode }),
-  setDrawColor:      (color) => set({ drawColor: color }),
 
   // ── FIX: Keyframes — deduplicate by time (±0.001 s tolerance) ────────────
   addKeyframe: (objectId, time) => {

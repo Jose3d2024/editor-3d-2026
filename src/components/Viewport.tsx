@@ -40,6 +40,11 @@ import { getLoopCutPreview } from '../utils/loopCut';
 import { safeFixed, safeNum } from '../utils/numberUtils';
 import { projectVerticesToFaces, snapPointToSurfaces, alignObjectRotationToNormal, getObjectBaseExtentAlongNormal } from '../utils/faceSnap';
 import { registerMeshes } from '../utils/meshRegistry';
+import { disposeObject, disposeHierarchy, disposeGeometry, disposeMaterial, disposeTexture } from '../utils/disposeUtils';
+import { createCameraVisualGroup, applyCameraLookAt, updateCameraTrackingVisual } from '../utils/cameraUtils';
+import { ViewportHeader } from './viewport/ViewportHeader';
+import { ViewportNavigationControls } from './viewport/ViewportNavigationControls';
+import { ViewportInfoOverlay } from './viewport/ViewportInfoOverlay';
 
 interface ViewportProps {
   type: ViewportType;
@@ -72,28 +77,7 @@ const snapAngleToPresets = (angleRad: number): number => {
 };
 
 const safeLookAt = (object: THREE.Object3D, target: THREE.Vector3) => {
-  const isCamera = (object as THREE.Camera).isCamera;
-  // Standard THREE.Camera looks down its local -Z axis when lookAt is called.
-  // Standard THREE.Object3D/Group points its local +Z axis at target when lookAt is called.
-  // For non-Camera visual helpers (like camGroup) whose geometry is constructed pointing down local -Z,
-  // we invert the target point relative to position so that local -Z points directly at target.
-  const effectiveTarget = isCamera
-    ? target
-    : new THREE.Vector3().subVectors(object.position.clone().multiplyScalar(2), target);
-
-  const dir = new THREE.Vector3().subVectors(effectiveTarget, object.position);
-  if (dir.lengthSq() < 0.000001) return;
-  dir.normalize();
-
-  // If direction is nearly parallel to default Y-up axis, temporarily switch UP vector to avoid Gimbal Lock singularity
-  const dotY = Math.abs(dir.dot(new THREE.Vector3(0, 1, 0)));
-  if (dotY > 0.999) {
-    object.up.set(0, 0, dir.y > 0 ? -1 : 1);
-  } else {
-    object.up.set(0, 1, 0);
-  }
-
-  object.lookAt(effectiveTarget);
+  applyCameraLookAt(object, target);
 };
 
 const computeGizmoLayout = (
@@ -320,7 +304,6 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   const [type, setType] = React.useState<ViewportType | 'CAMERA'>(initialType);
   const [title, setTitle] = React.useState(initialTitle);
   const [viewCameraId, setViewCameraId] = React.useState<string | null>(null);
-  const [showViewDropdown, setShowViewDropdown] = React.useState(false);
   const [isContextLost, setIsContextLost] = React.useState(false);
   const isContextLostRef = useRef(false);
 
@@ -329,7 +312,6 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     setType(initialType);
     setTitle(initialTitle);
     setViewCameraId(null);
-    setShowViewDropdown(false);
   }, [initialType, initialTitle]);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1267,6 +1249,9 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         controlsRef.current.dispose();
         controlsRef.current = null;
       }
+      if (sceneRef.current) {
+        disposeHierarchy(sceneRef.current);
+      }
     };
   }, [type, viewCameraId]);
 
@@ -1276,8 +1261,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     const scene = sceneRef.current;
     if (!scene) return;
 
-    // Cleanup old lights
-    lightsRef.current.forEach(l => scene.remove(l));
+    // Cleanup old lights and their gizmos/helpers
+    lightsRef.current.forEach(l => {
+      disposeObject(l);
+      scene.remove(l);
+    });
     lightsRef.current.clear();
 
     project.lights.forEach(lData => {
@@ -1382,7 +1370,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     });
 
     return () => {
-      lightsRef.current.forEach(l => scene.remove(l));
+      lightsRef.current.forEach(l => {
+        disposeObject(l);
+        scene.remove(l);
+      });
+      lightsRef.current.clear();
     };
   }, [project.lights, selectedLightId]);
 
@@ -1392,8 +1384,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     const scene = sceneRef.current;
     if (!scene) return;
 
-    // Cleanup old cameras
-    camerasRef.current.forEach(c => scene.remove(c));
+    // Cleanup old cameras and their visual elements
+    camerasRef.current.forEach(c => {
+      disposeObject(c);
+      scene.remove(c);
+    });
     camerasRef.current.clear();
 
     (project.cameras || []).forEach(cData => {
@@ -1401,154 +1396,21 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       const isSelected = selectedCameraId === cData.id;
 
       // Create visual group for the camera
-      const camGroup = new THREE.Group();
-      
-      // Lightweight Camera Body (Cuerpo liviano de la cámara)
-      const bodyGeom = new THREE.BoxGeometry(0.36, 0.24, 0.35);
-      const bodyMat = new THREE.MeshBasicMaterial({ color: isSelected ? 0x4f46e5 : 0x27272a });
-      const body = new THREE.Mesh(bodyGeom, bodyMat);
-      body.position.z = 0.175; // Extends back from z=0 to z=+0.35
-      body.userData = { id: cData.id, isCamera: true };
-      camGroup.add(body);
-
-      // Body Wireframe Outline (Contorno limpio)
-      const bodyWireMat = new THREE.MeshBasicMaterial({ color: isSelected ? 0xc7d2fe : 0x71717a, wireframe: true });
-      const bodyWire = new THREE.Mesh(bodyGeom, bodyWireMat);
-      bodyWire.position.z = 0.175;
-      camGroup.add(bodyWire);
-
-      // Single Simple Lens (Objetivo cilíndrico liviano apuntando a -Z)
-      const lensGeom = new THREE.CylinderGeometry(0.1, 0.12, 0.2, 32);
-      const lensMat = new THREE.MeshBasicMaterial({ color: isSelected ? 0x6366f1 : 0x3f3f46 });
-      const lens = new THREE.Mesh(lensGeom, lensMat);
-      lens.rotation.x = Math.PI / 2;
-      lens.position.z = -0.1;
-      lens.userData = { id: cData.id, isCamera: true };
-      camGroup.add(lens);
-
-      // Glass Lens Element
-      const glassGeom = new THREE.CircleGeometry(0.1, 32);
-      const glassMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide });
-      const glass = new THREE.Mesh(glassGeom, glassMat);
-      glass.position.z = -0.201;
-      glass.userData = { id: cData.id, isCamera: true };
-      camGroup.add(glass);
-
-      // FOV Frustum Wireframe Pyramid (Vista de pirámide limpia)
-      const frustumGroup = new THREE.Group();
-      const frustumGeo = new THREE.BufferGeometry();
-      const frustumVerts = new Float32Array([
-        // Rear lens rectangle (z = -0.20)
-        -0.10,  0.07, -0.20,   0.10,  0.07, -0.20,
-         0.10,  0.07, -0.20,   0.10, -0.07, -0.20,
-         0.10, -0.07, -0.20,  -0.10, -0.07, -0.20,
-        -0.10, -0.07, -0.20,  -0.10,  0.07, -0.20,
-
-        // Front view frame rectangle (z = -1.20)
-        -0.45,  0.30, -1.20,   0.45,  0.30, -1.20,
-         0.45,  0.30, -1.20,   0.45, -0.30, -1.20,
-         0.45, -0.30, -1.20,  -0.45, -0.30, -1.20,
-        -0.45, -0.30, -1.20,  -0.45,  0.30, -1.20,
-
-        // Connecting corner edges
-        -0.10,  0.07, -0.20,  -0.45,  0.30, -1.20,
-         0.10,  0.07, -0.20,   0.45,  0.30, -1.20,
-         0.10, -0.07, -0.20,   0.45, -0.30, -1.20,
-        -0.10, -0.07, -0.20,  -0.45, -0.30, -1.20,
-      ]);
-      frustumGeo.setAttribute('position', new THREE.BufferAttribute(frustumVerts, 3));
-      const frustumMat = new THREE.LineBasicMaterial({
-        color: isSelected ? 0x818cf8 : 0x6366f1,
-        transparent: true,
-        opacity: isSelected ? 0.95 : 0.6,
-      });
-      const frustumLines = new THREE.LineSegments(frustumGeo, frustumMat);
-      frustumGroup.add(frustumLines);
-      camGroup.add(frustumGroup);
-
-      // Target Tracking Ray & Crosshair Reticle Group
-      const targetGroup = new THREE.Group();
-      targetGroup.name = 'targetTrackingGroup';
-
-      const targetLineGeom = new THREE.BufferGeometry();
-      const targetLineMat = new THREE.LineDashedMaterial({
-        color: 0x22d3ee,
-        dashSize: 0.3,
-        gapSize: 0.15,
-        scale: 1,
-      });
-      const targetLine = new THREE.Line(targetLineGeom, targetLineMat);
-      targetLine.name = 'targetLine';
-      targetGroup.add(targetLine);
-
-      const reticleGroup = new THREE.Group();
-      reticleGroup.name = 'targetReticle';
-      const ringGeom = new THREE.RingGeometry(0.25, 0.35, 24);
-      const ringMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, side: THREE.DoubleSide });
-      const ring = new THREE.Mesh(ringGeom, ringMat);
-      reticleGroup.add(ring);
-
-      const xHairGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-0.45, 0, 0), new THREE.Vector3(0.45, 0, 0),
-        new THREE.Vector3(0, -0.45, 0), new THREE.Vector3(0, 0.45, 0),
-      ]);
-      const xHairMat = new THREE.LineBasicMaterial({ color: 0x22d3ee, linewidth: 2 });
-      reticleGroup.add(new THREE.LineSegments(xHairGeo, xHairMat));
-
-      targetGroup.add(reticleGroup);
-      camGroup.add(targetGroup);
-
-      // 2D Canvas Badge Tag (Floating 3D label above camera with icon and camera name)
-      const canvas = document.createElement('canvas');
-      canvas.width = 280;
-      canvas.height = 72;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.fillStyle = isSelected ? 'rgba(79, 70, 229, 0.95)' : 'rgba(24, 24, 27, 0.9)';
-        ctx.strokeStyle = isSelected ? '#a5b4fc' : 'rgba(255, 255, 255, 0.3)';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.roundRect(4, 4, 272, 64, 14);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 26px sans-serif';
-        ctx.fillText('📷', 16, 44);
-
-        ctx.font = 'bold 20px sans-serif';
-        ctx.fillText(cData.name.length > 15 ? cData.name.substring(0, 15) + '…' : cData.name, 60, 42);
-      }
-      const badgeTex = new THREE.CanvasTexture(canvas);
-      badgeTex.minFilter = THREE.LinearFilter;
-      const badgeMat = new THREE.SpriteMaterial({ map: badgeTex, depthTest: false, transparent: true });
-      const badgeSprite = new THREE.Sprite(badgeMat);
-      badgeSprite.renderOrder = 999;
-      badgeSprite.scale.set(2.0, 0.52, 1);
-      badgeSprite.position.set(0, 0.65, 0.1);
-      camGroup.add(badgeSprite);
+      const camGroup = createCameraVisualGroup(cData, isSelected);
 
       const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
       camGroup.position.copy(evalCam.position);
       if (evalCam.target) {
-        safeLookAt(camGroup, evalCam.target);
-        targetGroup.visible = true;
-        const dist = evalCam.position.distanceTo(evalCam.target);
-        targetLine.geometry = new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(0, 0, -0.20),
-          new THREE.Vector3(0, 0, -dist)
-        ]);
-        (targetLine as any).computeLineDistances();
-        reticleGroup.position.set(0, 0, -dist);
+        applyCameraLookAt(camGroup, evalCam.target);
+        updateCameraTrackingVisual(camGroup, evalCam.target);
       } else {
         camGroup.rotation.fromArray(cData.transform.rotation);
-        targetGroup.visible = false;
+        const targetGroup = camGroup.getObjectByName('targetTrackingGroup');
+        if (targetGroup) targetGroup.visible = false;
       }
       camGroup.scale.fromArray(cData.transform.scale);
       
-      camGroup.userData = { id: cData.id, isCamera: true };
       camGroup.visible = type !== 'CAMERA';
-      camGroup.traverse((child) => child.layers.set(1));
       scene.add(camGroup);
       camerasRef.current.set(cData.id, camGroup);
 
@@ -1557,7 +1419,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         const cam = cameraRef.current;
         cam.position.copy(evalCam.position);
         if (evalCam.target) {
-          safeLookAt(cam, evalCam.target);
+          applyCameraLookAt(cam, evalCam.target);
           if (controlsRef.current) {
             controlsRef.current.target.copy(evalCam.target);
           }
@@ -1588,7 +1450,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     });
 
     return () => {
-      camerasRef.current.forEach(c => scene.remove(c));
+      camerasRef.current.forEach(c => {
+        disposeObject(c);
+        scene.remove(c);
+      });
+      camerasRef.current.clear();
     };
   }, [project.cameras, selectedCameraId, type, viewCameraId]);
 
@@ -1700,36 +1566,12 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
               cg.position.copy(evalCam.position);
               
-              const targetGroup = cg.getObjectByName('targetTrackingGroup');
               if (evalCam.target) {
-                safeLookAt(cg, evalCam.target);
-                if (targetGroup) {
-                  targetGroup.visible = type !== 'CAMERA';
-                  const dist = evalCam.position.distanceTo(evalCam.target);
-                  const line = targetGroup.getObjectByName('targetLine') as THREE.Line;
-                  if (line) {
-                    const posAttr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
-                    if (posAttr && posAttr.count >= 2) {
-                      posAttr.setXYZ(0, 0, 0, -0.20);
-                      posAttr.setXYZ(1, 0, 0, -dist);
-                      posAttr.needsUpdate = true;
-                      (line as any).computeLineDistances?.();
-                    } else {
-                      line.geometry.dispose();
-                      line.geometry = new THREE.BufferGeometry().setFromPoints([
-                        new THREE.Vector3(0, 0, -0.20),
-                        new THREE.Vector3(0, 0, -dist)
-                      ]);
-                      (line as any).computeLineDistances?.();
-                    }
-                  }
-                  const reticle = targetGroup.getObjectByName('targetReticle');
-                  if (reticle) {
-                    reticle.position.set(0, 0, -dist);
-                  }
-                }
+                applyCameraLookAt(cg, evalCam.target);
+                updateCameraTrackingVisual(cg, evalCam.target);
               } else {
                 cg.rotation.fromArray(cData.transform.rotation);
+                const targetGroup = cg.getObjectByName('targetTrackingGroup');
                 if (targetGroup) targetGroup.visible = false;
               }
             }
@@ -1978,7 +1820,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   useEffect(() => {
     if (!sceneRef.current) return;
     const existing = sceneRef.current.getObjectByName('silueta-reference-plane');
-    if (existing) sceneRef.current.remove(existing);
+    if (existing) {
+      disposeObject(existing);
+      sceneRef.current.remove(existing);
+    }
 
     if (!silueta.activePlane) return;
 
@@ -1990,7 +1835,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
     new THREE.TextureLoader().load(imageUrl, tex => {
       const old = sceneRef.current?.getObjectByName('silueta-reference-plane');
-      if (old) sceneRef.current!.remove(old);
+      if (old) {
+        disposeObject(old);
+        sceneRef.current!.remove(old);
+      }
       
       const aspect = tex.image ? (tex.image.width / tex.image.height) : 1;
       const plane = new THREE.Mesh(
@@ -2015,13 +1863,21 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
       sceneRef.current?.add(plane);
     });
+
+    return () => {
+      const cleanupPlane = sceneRef.current?.getObjectByName('silueta-reference-plane');
+      if (cleanupPlane) {
+        disposeObject(cleanupPlane);
+        sceneRef.current?.remove(cleanupPlane);
+      }
+    };
   }, [silueta.activePlane, silueta.frontImage, silueta.backImage, silueta.leftImage, silueta.rightImage, silueta.topImage, silueta.bottomImage, type]);
 
   // ── Silueta Rendering ───────────────────────────────────────────────────
   useEffect(() => {
     const group = siluetaGroupRef.current;
     if (!group) return;
-    group.clear();
+    disposeHierarchy(group);
 
     // If silueta tool is active (any plane), we show the contours in their respective viewports
     if (!silueta.activePlane) return;
@@ -2076,42 +1932,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     const group = groupRef.current;
     const primitivesGroup = primitivesGroupRef.current;
     if (!group || !primitivesGroup) return;
-    // Deep dispose helper to guarantee all GPU resources and textures are released
-    const disposeDeepObject = (obj: THREE.Object3D) => {
-      if ((obj as THREE.Mesh).isMesh || (obj as THREE.Line).isLine || (obj as THREE.Points).isPoints) {
-        const mesh = obj as THREE.Mesh;
-        if (mesh.geometry) mesh.geometry.dispose();
-        if (mesh.material) {
-          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-          materials.forEach(mat => {
-            const m = mat as any;
-            const texKeys = [
-              'map', 'alphaMap', 'aoMap', 'bumpMap', 'displacementMap',
-              'emissiveMap', 'envMap', 'lightMap', 'metalnessMap',
-              'normalMap', 'roughnessMap', 'specularMap', 'clearcoatMap',
-              'clearcoatRoughnessMap', 'clearcoatNormalMap', 'sheenColorMap',
-              'sheenRoughnessMap', 'transmissionMap', 'thicknessMap',
-              'iridescenceMap', 'iridescenceThicknessMap', 'anisotropyMap',
-            ];
-            texKeys.forEach(k => {
-              if (m[k] && typeof m[k].dispose === 'function') m[k].dispose();
-            });
-            Object.keys(m).forEach(k => {
-              if (m[k] && m[k].isTexture && typeof m[k].dispose === 'function') m[k].dispose();
-            });
-            mat.dispose();
-          });
-        }
-      }
-      if (obj.children && obj.children.length > 0) {
-        obj.children.forEach(disposeDeepObject);
-      }
-    };
 
-    group.children.forEach(disposeDeepObject);
-    primitivesGroup.children.forEach(disposeDeepObject);
-    group.clear();
-    primitivesGroup.clear();
+    disposeHierarchy(group);
+    disposeHierarchy(primitivesGroup);
+    if (hoverGroupRef.current) disposeHierarchy(hoverGroupRef.current);
     meshesRef.current.clear();
     vertexPointsRef.current = null;
 
@@ -2292,12 +2116,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             }
           });
           oldOverlays.forEach((overlay) => {
+            disposeObject(overlay);
             if (overlay.parent) overlay.parent.remove(overlay);
-            if ((overlay as THREE.Mesh).material) {
-              const m = (overlay as THREE.Mesh).material;
-              if (Array.isArray(m)) m.forEach(x => x.dispose());
-              else m.dispose();
-            }
           });
 
           // 2. Collect genuine model meshes to avoid mutating hierarchy during traversal
@@ -3573,7 +3393,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       targetIds.forEach(id => {
         const mesh = meshesRef.current.get(id);
         if (mesh) {
-          disposeDeepObject(mesh);
+          disposeObject(mesh);
           mesh.removeFromParent();
           meshesRef.current.delete(id);
         }
@@ -3584,8 +3404,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     return () => {
       isEffectCancelled = true;
       window.removeEventListener('csg-dispose-object', handleDirectDispose);
-      group.children.forEach(disposeDeepObject);
-      primitivesGroup.children.forEach(disposeDeepObject);
+      disposeHierarchy(group);
+      disposeHierarchy(primitivesGroup);
 
       // Clean up deleted particle simulators
       const currentObjectIds = new Set(project.objects.map(o => o.id));
@@ -7953,222 +7773,58 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <div className="absolute top-1 left-1 sm:top-2 sm:left-2 z-40 flex items-center gap-1.5 flex-wrap">
-        <div
-          className="px-1.5 py-0.5 sm:px-2 sm:py-1 bg-black/50 hover:bg-black/70 text-[8px] sm:text-xs text-white rounded font-mono uppercase tracking-wider cursor-pointer hover:text-indigo-300 select-none border border-white/10 hover:border-white/30 flex items-center gap-1.5 drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] transition-all backdrop-blur-sm"
-          onPointerDown={e=>e.stopPropagation()}
-          onClick={e=>{e.stopPropagation();setMaximizedViewport(maximizedViewport===type?null:type);}}
-        >
-          {viewCameraId ? (
-            <Camera size={13} className="text-indigo-400 shrink-0 animate-pulse" />
-          ) : type === 'PERSPECTIVE' ? (
-            <Globe size={13} className="text-indigo-300 shrink-0" />
-          ) : (
-            <Eye size={13} className="text-zinc-400 shrink-0" />
-          )}
-          <span>{title} {maximizedViewport===type?'[-]':'[+]'}</span>
-          {maximizedViewport === type && (
-            <div 
-              className="ml-2 px-1 bg-indigo-600 hover:bg-indigo-500 rounded text-[8px] font-bold"
-              onClick={(e) => { e.stopPropagation(); setMaximizedViewport(null); }}
-            >
-              RESTAURAR 4 VISTAS
-            </div>
-          )}
-        </div>
+      {/* 1. Header with title, camera badge and view selector */}
+      <ViewportHeader
+        type={type}
+        title={title}
+        viewCameraId={viewCameraId}
+        maximizedViewport={maximizedViewport}
+        project={project}
+        activeViewport={activeViewport}
+        isRecording={isRecording}
+        onSelectType={(v, t) => {
+          setType(v);
+          setTitle(t);
+          setViewCameraId(null);
+        }}
+        onSelectCamera={(camId, name) => {
+          setType('CAMERA');
+          setTitle(name);
+          setViewCameraId(camId);
+        }}
+        onToggleMaximize={() => setMaximizedViewport(maximizedViewport === type ? null : type)}
+      />
 
-        {/* Camera Target Status Badge when viewing through a Camera */}
-        {type === 'CAMERA' && viewCameraId && (
-          <div className="bg-indigo-950/80 border border-indigo-500/40 text-indigo-200 px-2 py-0.5 rounded text-[9px] font-mono flex items-center gap-1.5 shadow-lg backdrop-blur-sm select-none">
-            <Camera size={11} className="text-indigo-400 shrink-0" />
-            <span className="font-bold text-indigo-300">VISTA CÁMARA</span>
-            {(() => {
-              const activeCam = project.cameras?.find(c => c.id === viewCameraId);
-              if (activeCam?.targetObjectId) {
-                const targetObj = project.objects.find(o => o.id === activeCam.targetObjectId);
-                return (
-                  <span className="text-indigo-200 text-[9px] border-l border-indigo-500/40 pl-1.5 flex items-center gap-1">
-                    <Target size={10} className="text-indigo-400 shrink-0" />
-                    <span>Objetivo: <strong className="text-white font-bold">{targetObj?.name || 'Objeto'}</strong></span>
-                  </span>
-                );
-              }
-              return null;
-            })()}
-          </div>
-        )}
+      {/* 2. Navigation and Alignment Toolbar */}
+      <ViewportNavigationControls
+        project={project}
+        selectedObjectId={selectedObjectId}
+        drawMode={drawMode}
+        gridSnapEnabled={gridSnapEnabled}
+        faceSnapConfig={faceSnapConfig}
+        onZoomIn={handleZoomIn}
+        onZoomOut={handleZoomOut}
+        onRecenter={handleRecenter}
+        onResetView={handleResetView}
+        onToggleHdriBg={handleToggleHdriBg}
+        onRecenterPivot={handleRecenterPivot}
+        onAlignToAxes={handleAlignToAxes}
+        onAlignToFloor={handleAlignToFloor}
+        onToggleGridSnap={() => setGridSnapEnabled(!gridSnapEnabled)}
+        onToggleFaceSnap={() => toggleFaceSnap?.()}
+      />
 
-        {/* View Selector Dropdown */}
-        <div 
-          className="relative" 
-          onPointerDown={e => e.stopPropagation()}
-          onMouseEnter={() => setShowViewDropdown(true)}
-          onMouseLeave={() => setShowViewDropdown(false)}
-        >
-          <button 
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowViewDropdown(prev => !prev);
-            }}
-            className="p-1 sm:p-1.5 bg-black/50 hover:bg-zinc-800 text-white rounded border border-white/20 hover:border-indigo-400 transition-colors drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] flex items-center gap-1 cursor-pointer"
-            title="Seleccionar Visor"
-          >
-            <ChevronDown size={12} className={`transition-transform duration-150 ${showViewDropdown ? 'rotate-180' : ''}`} />
-          </button>
-
-          {showViewDropdown && (
-            <div className="absolute top-full left-0 pt-1 min-w-[150px] z-[100] max-h-[220px] sm:max-h-[260px]">
-              <div className="bg-zinc-900/98 backdrop-blur-md border border-white/20 rounded-md shadow-2xl overflow-y-auto max-h-[210px] sm:max-h-[250px] py-1 custom-scrollbar scrollbar-thin scrollbar-thumb-zinc-700">
-                <div className="px-3 py-1 text-[9px] font-bold text-zinc-400 uppercase tracking-wider border-b border-white/10 sticky top-0 bg-zinc-900 z-10">
-                  Visores 3D
-                </div>
-                {(['PERSPECTIVE', 'TOP', 'BOTTOM', 'FRONT', 'BACK', 'LEFT', 'RIGHT'] as ViewportType[]).map(v => (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setType(v);
-                      setTitle(v.charAt(0) + v.slice(1).toLowerCase());
-                      setViewCameraId(null);
-                      setShowViewDropdown(false);
-                    }}
-                    className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-indigo-600 hover:text-white transition-colors flex items-center justify-between cursor-pointer ${type === v && !viewCameraId ? 'text-indigo-400 font-bold bg-indigo-950/50' : 'text-zinc-200'}`}
-                  >
-                    <span>{v}</span>
-                    {type === v && !viewCameraId && <span className="text-[9px] text-indigo-300">✓</span>}
-                  </button>
-                ))}
-                {project.cameras && project.cameras.length > 0 && (
-                  <>
-                    <div className="h-px bg-white/10 my-1" />
-                    <div className="px-3 py-1 text-[9px] font-bold text-zinc-400 uppercase tracking-wider border-b border-white/10">
-                      Cámaras
-                    </div>
-                    {project.cameras.map(cam => (
-                      <button
-                        key={cam.id}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setType('CAMERA');
-                          setTitle(cam.name);
-                          setViewCameraId(cam.id);
-                          setShowViewDropdown(false);
-                        }}
-                        className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-indigo-600 hover:text-white transition-colors flex items-center justify-between cursor-pointer ${viewCameraId === cam.id ? 'text-indigo-400 font-bold bg-indigo-950/50' : 'text-zinc-200'}`}
-                      >
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <Camera size={12} className={viewCameraId === cam.id ? "text-indigo-400 shrink-0" : "text-zinc-400 shrink-0"} />
-                          <span className="truncate max-w-[100px]">{cam.name}</span>
-                        </div>
-                        {viewCameraId === cam.id && <span className="text-[9px] text-indigo-300 shrink-0">✓</span>}
-                      </button>
-                    ))}
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {isRecording && activeViewport === type && (
-          <span className="flex items-center gap-1 text-red-500 animate-pulse bg-black/60 px-2 py-1 rounded border border-red-500/30 text-[10px]">
-            <span className="w-2 h-2 rounded-full bg-red-500"></span>
-            REC
-          </span>
-        )}
-      </div>
-
-      <div className="absolute top-10 left-1 sm:top-12 sm:left-2 z-40 flex flex-col gap-2">
-        {[
-          {fn:handleZoomIn,  title:'Acercar',  icon:<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>},
-          {fn:handleZoomOut, title:'Alejar', icon:<line x1="5" y1="12" x2="19" y2="12"/>},
-          {fn:handleRecenter,title:'Recentrar',  icon:<><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></>},
-          {fn:handleResetView,title:'Reset Vista', icon:<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>},
-          {
-            fn: handleToggleHdriBg,
-            title: (project.environment?.backgroundMode === 'HDRI' && project.environment?.backgroundVisible !== false)
-              ? 'Mapa HDRI de fondo: VISIBLE (Haz clic para ocultar del visor)'
-              : 'Mapa HDRI de fondo: OCULTO (Haz clic para mostrar mapa HDRI en el visor)',
-            rawIcon: <Globe size={16} />,
-            active: (project.environment?.backgroundMode === 'HDRI' && project.environment?.backgroundVisible !== false)
-          },
-          ...(selectedObjectId ? [
-            {fn:handleRecenterPivot, title:'Centrar Pivote / Origen al Objeto', icon:<><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>},
-            {fn:handleAlignToAxes, title:'Alinear a Ejes (90°)', icon:<><path d="M4 20h16"/><path d="M4 4v16"/><path d="M14 10l-4-4-4 4"/><path d="M10 14l4 4 4-4"/></>},
-            {fn:handleAlignToFloor, title:'Alinear al Suelo (Y=0)', icon:<><path d="M2 22h20"/><path d="M12 2v14"/><path d="m7 11 5 5 5-5"/></>}
-          ] : []),
-        ].map(({fn,title:t,icon,rawIcon,active})=>(
-          <button key={t} onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();fn();}}
-            className={`p-2 sm:p-1.5 rounded-lg shadow-xl cursor-pointer touch-none active:bg-indigo-600 transition-colors border ${
-              active
-                ? 'bg-amber-600/90 border-amber-400 text-white shadow-amber-500/20'
-                : 'bg-zinc-800/95 border-white/10 text-white hover:bg-zinc-700'
-            }`} title={t}>
-            {rawIcon ? rawIcon : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>}
-          </button>
-        ))}
-        {/* Grid snap toggle — only useful when drawMode is active */}
-        {drawMode && (
-          <button
-            onPointerDown={e=>e.stopPropagation()}
-            onClick={e=>{e.stopPropagation(); setGridSnapEnabled(!gridSnapEnabled);}}
-            className={`p-2 sm:p-1.5 rounded-lg shadow-xl cursor-pointer touch-none transition-colors border text-[10px] font-bold leading-none
-              ${gridSnapEnabled
-                ? 'bg-indigo-600 border-indigo-400 text-white'
-                : 'bg-zinc-800/95 border-white/10 text-zinc-400 hover:bg-zinc-700 hover:text-white'}`}
-            title={gridSnapEnabled ? 'Snap a cuadrícula: ON' : 'Snap a cuadrícula: OFF'}
-          >
-            ⊞
-          </button>
-        )}
-
-        {/* Face Snap / Snapping to geometry (Retopology magnet) */}
-        <button
-          onPointerDown={e => e.stopPropagation()}
-          onClick={e => {
-            e.stopPropagation();
-            toggleFaceSnap?.();
-          }}
-          className={`p-2 sm:p-1.5 rounded-lg shadow-xl cursor-pointer touch-none transition-colors border text-[10px] font-bold leading-none flex items-center justify-center ${
-            faceSnapConfig?.enabled
-              ? 'bg-amber-500 border-amber-300 text-black shadow-amber-500/40 ring-1 ring-amber-400 font-black'
-              : 'bg-zinc-800/95 border-white/10 text-zinc-400 hover:bg-zinc-700 hover:text-white'
-          }`}
-          title={
-            faceSnapConfig?.enabled
-              ? `Imán Ajuste a Caras: ACTIVADO (Offset: ${faceSnapConfig?.offset ?? 0.005}, Proy. Individual: ${faceSnapConfig?.projectIndividualElements ? 'SÍ' : 'NO'})`
-              : 'Activar Imán Ajuste a Caras (Snapping para Retopología)'
-          }
-        >
-          <Magnet size={14} className={faceSnapConfig?.enabled ? 'text-black' : 'text-zinc-400'} />
-        </button>
-      </div>
-
-      {activeViewport===type && (project.objects || []).find(o=>o.id===selectedObjectId) && (
-        <div className="absolute bottom-1 left-1 z-30 px-1.5 py-0.5 bg-black/50 text-[10px] text-white font-mono rounded pointer-events-none">
-          {(()=>{
-            const obj = (project.objects || []).find(o=>o.id===selectedObjectId);
-            if (!obj) return null;
-            const _interp = getInterpolatedTransform(obj, currentTime);
-            const pos = _interp?.position || [0, 0, 0];
-            return `X:${safeFixed(pos[0], 2)} Y:${safeFixed(pos[1], 2)} Z:${safeFixed(pos[2], 2)}${obj.keyframes?.length ? ` [${obj.keyframes.length}kf]` : ''}`;
-          })()}
-        </div>
-      )}
-
-      {/* WebGL Context Lost Recovery Overlay */}
-      {isContextLost && (
-        <div className="absolute inset-0 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center z-50 text-white p-4 select-none">
-          <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mb-3" />
-          <p className="text-xs font-bold text-amber-300 uppercase tracking-wider">Contexto WebGL Suspendido</p>
-          <p className="text-[11px] text-zinc-400 mt-1.5 text-center max-w-xs leading-relaxed">
-            El navegador pausó temporalmente los recursos gráficos de la GPU. Esperando reactivación automática...
-          </p>
-        </div>
-      )}
+      {/* 3. Coordinate Display and WebGL Recovery Overlay */}
+      <ViewportInfoOverlay
+        selectedObject={activeViewport === type ? (project.objects || []).find(o => o.id === selectedObjectId) || null : null}
+        interpolatedPos={(() => {
+          const obj = (project.objects || []).find(o => o.id === selectedObjectId);
+          if (!obj) return undefined;
+          const _interp = getInterpolatedTransform(obj, currentTime);
+          return _interp?.position;
+        })()}
+        isContextLost={isContextLost}
+      />
 
       {/* Gizmo numeric value display — shown while dragging an axis */}
       <div

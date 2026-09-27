@@ -5,6 +5,7 @@ import { useStore } from '../store/useStore';
 import { createPBRMaterial } from '../utils/materialUtils';
 import { MaterialPanel } from './MaterialPanel';
 import { createPolarEquirectangularCanvas, createStudioEquirectangularCanvas } from '../utils/environmentHelper';
+import { disposeObject, disposeHierarchy, disposeTexture } from '../utils/disposeUtils';
 import {
   ArrowLeft, Palette, Sparkles, RotateCw, Sun, Box, Eye, EyeOff,
   Maximize2, Camera, Download, Layers, ShieldCheck, Check,
@@ -722,6 +723,9 @@ export const MaterialStudioViewport: React.FC = () => {
       if (threeRefs.current?.reqId) {
         cancelAnimationFrame(threeRefs.current.reqId);
       }
+      if (threeRefs.current?.scene) {
+        disposeHierarchy(threeRefs.current.scene);
+      }
       pmremGenerator.dispose();
       renderer.dispose();
     };
@@ -758,9 +762,14 @@ export const MaterialStudioViewport: React.FC = () => {
     refs.rimLight.intensity = preset.rimIntensity;
 
     // Generate dynamic equirectangular texture for preset
+    const oldEnv = refs.scene.environment as THREE.Texture | null;
     const envTexture = createEquirectangularTextureForPreset(envPresetId);
     refs.scene.environment = envTexture;
     refs.scene.background = envTexture; // Set HDRI environment as the 100% full background
+
+    if (oldEnv && oldEnv !== envTexture) {
+      disposeTexture(oldEnv);
+    }
   }, [envPresetId, lightRotation]);
 
   // Update Wireframe visibility
@@ -799,14 +808,10 @@ export const MaterialStudioViewport: React.FC = () => {
     }
     refs.currentMaterial = mat;
 
-    // Remove previous mesh
+    // Remove previous mesh and dispose its resources
     if (refs.currentMesh) {
       refs.previewGroup.remove(refs.currentMesh);
-      refs.currentMesh.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          (child as THREE.Mesh).geometry?.dispose();
-        }
-      });
+      disposeObject(refs.currentMesh);
     }
 
     // If volumetric material, auto select VOLUME preview if requested

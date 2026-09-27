@@ -182,6 +182,9 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
         p.innerRadius ?? 0.25, p.outerRadius ?? 0.5,
         Math.max(3, Math.round(p.thetaSegments ?? 16)));
       break;
+    case 'MESH':
+      geo = new THREE.BufferGeometry();
+      break;
     default:
       geo = new THREE.BoxGeometry(1, 1, 1);
   }
@@ -250,7 +253,9 @@ export function createPrimitiveMesh(obj: CSGObject, time: number): THREE.Mesh {
 
 function createNonIndexedMesh(obj: CSGObject, time: number): THREE.Mesh {
   const transform = interpolateTransform(obj.keyframes, time, obj.transform);
-  const geo = createBaseGeometry(obj).toNonIndexed();
+  const baseGeo = createBaseGeometry(obj);
+  const geo = baseGeo.toNonIndexed();
+  baseGeo.dispose();
 
   if (obj.vertexOffsets && Object.keys(obj.vertexOffsets).length > 0) {
     // Build a mapping from indexed → non-indexed positions before applying offsets
@@ -298,11 +303,15 @@ export function performCSG(objects: CSGObject[], time: number): THREE.Mesh | nul
       else if (obj.operation === 'INTERSECT') resultCSG = csgA.intersect(csgB);
 
       if (resultCSG) {
+        const oldGeo = resultMesh.geometry;
         resultMesh = CSG.toMesh(resultCSG, resultMesh.matrix, resultMesh.material);
         resultMesh.updateMatrixWorld(true);
+        if (oldGeo) oldGeo.dispose();
       }
+      nextMesh.geometry?.dispose();
     } catch (e) {
       console.error(`CSG operation failed for object "${obj.name}":`, e);
+      nextMesh.geometry?.dispose();
     }
   }
 

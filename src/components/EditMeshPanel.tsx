@@ -701,8 +701,8 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
 
             <button
               type="button"
-              onClick={() => {
-                const res = deleteSelectedVertices(obj.id, selectedVertexIndices);
+              onClick={async () => {
+                const res = await deleteSelectedVertices(obj.id, selectedVertexIndices);
                 showFeedback(res.message);
               }}
               disabled={selectedVertexIndices.length === 0}
@@ -977,8 +977,8 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
 
             <button
               type="button"
-              onClick={() => {
-                const res = deleteSelectedEdges(obj.id, selectedEdgeIndices);
+              onClick={async () => {
+                const res = await deleteSelectedEdges(obj.id, selectedEdgeIndices);
                 showFeedback(res.message);
               }}
               disabled={selectedEdgeIndices.length < 2}
@@ -1680,12 +1680,12 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
                 <button
                   type="button"
                   disabled={selectedFaceIndices.length === 0 && selectedVertexIndices.length === 0}
-                  onClick={() => {
+                  onClick={async () => {
                     if (editMode === 'VERTEX') {
-                      const res = deleteSelectedVertices(obj.id, selectedVertexIndices);
+                      const res = await deleteSelectedVertices(obj.id, selectedVertexIndices);
                       showFeedback(res.message);
                     } else {
-                      const res = deleteSelectedFaces(obj.id, selectedFaceIndices);
+                      const res = await deleteSelectedFaces(obj.id, selectedFaceIndices);
                       showFeedback(res.message);
                     }
                   }}

@@ -2061,53 +2061,92 @@ export type { LimitedDissolveOptions, LimitedDissolveResult } from './limitedDis
 
 /**
  * 1. Delete Loose (Borrar sueltos):
- * Elimina vértices o aristas flotantes/huérfanos que no forman ninguna cara en el modelo.
+ * Elimina vértices o aristas flotantes/huérfanos que no forman ninguna cara (o arista en wireframe) en el modelo.
  */
 export function deleteLooseElements(
-  obj: CSGObject | { vertices: V3[]; faces: MeshFace[] }
-): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
+  obj: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3>; wireframeEdges?: [number, number][] }
+): { vertices: V3[]; faces: MeshFace[]; wireframeEdges?: [number, number][]; report: string[] } {
   if (!obj.vertices || obj.vertices.length === 0) {
     return { vertices: [], faces: [], report: ['Sin vértices en el objeto'] };
   }
+
+  // Hornear vertexOffsets si existen
+  const bakedVerts: V3[] = obj.vertices.map((v, i) => {
+    const off = (obj as any).vertexOffsets?.[i] || [0, 0, 0];
+    return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+  });
+
   const used = new Set<number>();
-  for (const f of obj.faces || []) {
+  const faces = obj.faces || [];
+  for (const f of faces) {
+    if (!f.indices) continue;
     for (const i of f.indices) {
-      if (i >= 0 && i < obj.vertices.length) used.add(i);
+      if (i >= 0 && i < bakedVerts.length) used.add(i);
     }
   }
-  const looseCount = obj.vertices.length - used.size;
-  const compact: number[] = new Array(obj.vertices.length).fill(-1);
+
+  // Si no hay caras pero hay wireframeEdges, preservar vértices del wireframe
+  const wireEdges = (obj as any).wireframeEdges as [number, number][] | undefined;
+  if (faces.length === 0 && wireEdges && wireEdges.length > 0) {
+    for (const [a, b] of wireEdges) {
+      if (a >= 0 && a < bakedVerts.length) used.add(a);
+      if (b >= 0 && b < bakedVerts.length) used.add(b);
+    }
+  }
+
+  const looseCount = bakedVerts.length - used.size;
+  const compact: number[] = new Array(bakedVerts.length).fill(-1);
   const finalVerts: V3[] = [];
-  for (let i = 0; i < obj.vertices.length; i++) {
+  for (let i = 0; i < bakedVerts.length; i++) {
     if (used.has(i)) {
       compact[i] = finalVerts.length;
-      finalVerts.push([...obj.vertices[i]] as V3);
+      finalVerts.push([...bakedVerts[i]] as V3);
     }
   }
-  const finalFaces = (obj.faces || []).map(f => ({
+
+  const finalFaces = faces.map(f => ({
     ...f,
     indices: f.indices.map(i => compact[i]).filter(i => i !== -1)
   })).filter(f => f.indices.length >= 3);
 
+  const finalWireEdges = wireEdges
+    ? wireEdges
+        .map(([a, b]) => [compact[a], compact[b]] as [number, number])
+        .filter(([a, b]) => a !== -1 && b !== -1 && a !== b)
+    : undefined;
+
+  const report: string[] = [];
+  if (looseCount > 0) {
+    report.push(`${looseCount} vértice(s) huérfano(s) o aislado(s) purgado(s)`);
+  } else {
+    report.push('Malla limpia: no se encontraron vértices sueltos');
+  }
+
   return {
     vertices: finalVerts,
     faces: finalFaces,
-    report: looseCount > 0 ? [`${looseCount} vértice(s) suelto(s) o aislado(s) eliminado(s)`] : ['No se encontraron vértices sueltos']
+    wireframeEdges: finalWireEdges,
+    report
   };
 }
 
 /**
  * 2. Degenerate Dissolve:
- * Elimina caras o aristas de área cero o colapsadas que no aportan geometría real al modelo.
+ * Elimina caras o aristas de área nula o colapsadas que no aportan geometría real al modelo.
  */
 export function dissolveDegenerateElements(
-  obj: CSGObject | { vertices: V3[]; faces: MeshFace[] },
-  minArea: number = 1e-7
+  obj: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
+  minArea: number = 1e-5
 ): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
   if (!obj.vertices || obj.vertices.length === 0) {
     return { vertices: [], faces: [], report: ['Sin vértices'] };
   }
-  const verts = obj.vertices;
+
+  const bakedVerts: V3[] = obj.vertices.map((v, i) => {
+    const off = (obj as any).vertexOffsets?.[i] || [0, 0, 0];
+    return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+  });
+
   let degenerateCount = 0;
   const keptFaces: MeshFace[] = [];
 
@@ -2116,24 +2155,42 @@ export function dissolveDegenerateElements(
       degenerateCount++;
       continue;
     }
+
+    // Filtrar índices repetidos consecutivos en el bucle
     const filtered: number[] = [];
+    const filteredUVs: [number, number][] = [];
+    const hasUvs = f.uvs && f.uvs.length >= f.indices.length;
+
     for (let k = 0; k < f.indices.length; k++) {
       const idx = f.indices[k];
-      if (k === 0 || idx !== f.indices[k - 1]) filtered.push(idx);
+      if (filtered.length === 0 || idx !== filtered[filtered.length - 1]) {
+        filtered.push(idx);
+        if (hasUvs && f.uvs) filteredUVs.push(f.uvs[k]);
+      }
     }
-    if (filtered.length > 1 && filtered[0] === filtered[filtered.length - 1]) filtered.pop();
+    if (filtered.length > 1 && filtered[0] === filtered[filtered.length - 1]) {
+      filtered.pop();
+      if (hasUvs) filteredUVs.pop();
+    }
+
     if (filtered.length < 3) {
+      degenerateCount++;
+      continue;
+    }
+
+    const uniqueSet = new Set(filtered);
+    if (uniqueSet.size < 3) {
       degenerateCount++;
       continue;
     }
 
     // Calcular área poligonal en 3D
     let totalArea = 0;
-    const p0 = verts[filtered[0]];
+    const p0 = bakedVerts[filtered[0]];
     if (!p0) { degenerateCount++; continue; }
     for (let i = 1; i < filtered.length - 1; i++) {
-      const p1 = verts[filtered[i]];
-      const p2 = verts[filtered[i + 1]];
+      const p1 = bakedVerts[filtered[i]];
+      const p2 = bakedVerts[filtered[i + 1]];
       if (!p1 || !p2) continue;
       const ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
       const bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
@@ -2148,14 +2205,25 @@ export function dissolveDegenerateElements(
       continue;
     }
 
-    keptFaces.push({ ...f, indices: filtered });
+    keptFaces.push({
+      ...f,
+      indices: filtered,
+      ...(hasUvs && filteredUVs.length === filtered.length ? { uvs: filteredUVs } : {})
+    });
   }
 
-  const looseClean = deleteLooseElements({ vertices: verts, faces: keptFaces });
+  const looseClean = deleteLooseElements({ vertices: bakedVerts, faces: keptFaces });
+  const report: string[] = [];
+  if (degenerateCount > 0) {
+    report.push(`${degenerateCount} cara(s) degeneradas o con área nula disuelta(s)`);
+  } else {
+    report.push('No se detectaron caras degeneradas (malla limpia)');
+  }
+
   return {
     vertices: looseClean.vertices,
     faces: looseClean.faces,
-    report: degenerateCount > 0 ? [`${degenerateCount} cara(s) degeneradas o con área nula disuelta(s)`] : ['No se detectaron caras degeneradas']
+    report
   };
 }
 

@@ -1064,8 +1064,8 @@ const SubElementEditSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             {/* Eliminar Caras */}
             <button
               type="button"
-              onClick={() => {
-                const res = deleteSelectedFaces(obj.id, selectedFaceIndices);
+              onClick={async () => {
+                const res = await deleteSelectedFaces(obj.id, selectedFaceIndices);
                 if (!res.success) alert(res.message);
               }}
               disabled={selectedFaceIndices.length === 0}
@@ -1167,8 +1167,8 @@ const SubElementEditSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
               <button
                 type="button"
-                onClick={() => {
-                  const res = deleteSelectedEdges(obj.id, selectedEdgeIndices);
+                onClick={async () => {
+                  const res = await deleteSelectedEdges(obj.id, selectedEdgeIndices);
                   if (!res.success) alert(res.message);
                 }}
                 disabled={selectedEdgeIndices.length < 2}
@@ -1249,8 +1249,8 @@ const SubElementEditSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
               <button
                 type="button"
-                onClick={() => {
-                  const res = deleteSelectedVertices(obj.id, selectedVertexIndices);
+                onClick={async () => {
+                  const res = await deleteSelectedVertices(obj.id, selectedVertexIndices);
                   if (!res.success) alert(res.message);
                 }}
                 disabled={selectedVertexIndices.length === 0}
@@ -1547,8 +1547,8 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    const res = deleteSelectedVertices(obj.id, selectedVertexIndices);
+                  onClick={async () => {
+                    const res = await deleteSelectedVertices(obj.id, selectedVertexIndices);
                     if (!res.success) alert(res.message);
                   }}
                   disabled={selectedVertexIndices.length === 0}

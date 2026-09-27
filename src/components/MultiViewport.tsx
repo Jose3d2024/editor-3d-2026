@@ -63,7 +63,7 @@ const PRESET_SLOTS: Record<ViewportLayoutPreset, SlotConfig[]> = {
   ],
   SPLIT_V: [
     { id: 'splitv-0', defaultType: 'PERSPECTIVE', defaultTitle: 'Perspectiva', rect: (sx) => ({ left: '0%', top: '0%', width: `${sx * 100}%`, height: '100%' }) },
-    { id: 'splitv-1', defaultType: 'TOP', defaultTitle: 'Superior (Planta)', rect: (sx) => ({ left: `${sx * 100}%`, top: '0%', width: `${(1 - sx) * 100}%`, height: `${(1 - sx) * 100}%` }) },
+    { id: 'splitv-1', defaultType: 'TOP', defaultTitle: 'Superior (Planta)', rect: (sx) => ({ left: `${sx * 100}%`, top: '0%', width: `${(1 - sx) * 100}%`, height: '100%' }) },
   ],
 };
 

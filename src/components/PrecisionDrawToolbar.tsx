@@ -422,8 +422,8 @@ export const PrecisionDrawToolbar: React.FC = () => {
           {/* Eliminar Caras */}
           <button
             type="button"
-            onClick={() => {
-              const res = deleteSelectedFaces(selectedObjectId!, selectedFaceIndices);
+            onClick={async () => {
+              const res = await deleteSelectedFaces(selectedObjectId!, selectedFaceIndices);
               if (!res.success) alert(res.message);
             }}
             disabled={selectedFaceIndices.length === 0}
@@ -540,8 +540,8 @@ export const PrecisionDrawToolbar: React.FC = () => {
           {/* Eliminar Borde */}
           <button
             type="button"
-            onClick={() => {
-              const res = deleteSelectedEdges(selectedObjectId!, selectedEdgeIndices);
+            onClick={async () => {
+              const res = await deleteSelectedEdges(selectedObjectId!, selectedEdgeIndices);
               if (!res.success) alert(res.message);
             }}
             disabled={selectedEdgeIndices.length < 2}
@@ -678,8 +678,8 @@ export const PrecisionDrawToolbar: React.FC = () => {
           {/* Eliminar Vértice */}
           <button
             type="button"
-            onClick={() => {
-              const res = deleteSelectedVertices(selectedObjectId!, selectedVertexIndices);
+            onClick={async () => {
+              const res = await deleteSelectedVertices(selectedObjectId!, selectedVertexIndices);
               if (!res.success) {
                 alert(res.message);
               }
