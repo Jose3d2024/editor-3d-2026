@@ -243,7 +243,7 @@ interface Store extends AppState {
   removeCamera: (id: string) => void;
   updateCamera: (id: string, updates: Partial<CameraObject>) => void;
   selectCamera: (id: string | null) => void;
-  addShape: (type: 'line' | 'rect' | 'bezier', vertices: V3[], closed: boolean, handles?: BezierHandle[]) => void;
+  addShape: (type: 'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline', vertices: V3[], closed: boolean, handles?: BezierHandle[]) => void;
   addShapeVertices: (id: string, vertices: V3[], handles: BezierHandle[]) => void;
   updateObject: (id: string, updates: Partial<CSGObject>) => void;
   updateObjects: (ids: string[], updates: Partial<CSGObject> | ((id: string) => Partial<CSGObject>)) => void;
@@ -275,7 +275,7 @@ interface Store extends AppState {
   setEditMode: (mode: 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE') => Promise<void>;
   setTransformMode: (mode: TransformMode) => void;
   setTransformSpace: (space: 'world' | 'local') => void;
-  setDrawMode: (mode: 'line' | 'rect' | 'bezier' | null) => void;
+  setDrawMode: (mode: 'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline' | null) => void;
   setDrawColor: (color: string) => void;
   setActiveViewport: (viewport: ViewportType) => void;
   setSelectedVertexIndices: (indices: number[]) => void;
@@ -617,6 +617,7 @@ export const useStore = create<Store>()((set, get) => ({
   setDrawLockAxis: (axis) => set({ drawLockAxis: axis }),
   insertVertexMode: false,
   setInsertVertexMode: (enabled) => set({ insertVertexMode: enabled }),
+  toggleInsertVertexMode: (enabled) => set(s => ({ insertVertexMode: enabled !== undefined ? enabled : !s.insertVertexMode })),
   loopCutMode: false,
   setLoopCutMode: (enabled) => set({ loopCutMode: enabled }),
   loopCutCuts: 1,
@@ -4725,28 +4726,60 @@ export const useStore = create<Store>()((set, get) => ({
         mergedCount++;
       }
 
+      // Spatial grid hashing for linear O(N) vertex clustering
+      const cellSize = Math.max(0.00001, tolerance);
+      const grid = new Map<string, number[]>();
+      for (let i = 0; i < rawVerts.length; i++) {
+        const v = rawVerts[i];
+        const gx = Math.floor(v[0] / cellSize);
+        const gy = Math.floor(v[1] / cellSize);
+        const gz = Math.floor(v[2] / cellSize);
+        const key = `${gx}_${gy}_${gz}`;
+        const list = grid.get(key);
+        if (list) list.push(i);
+        else grid.set(key, [i]);
+      }
+
       const visited = new Set<number>();
       for (let i = 0; i < rawVerts.length; i++) {
         if (visited.has(i)) continue;
+        visited.add(i);
+        const v = rawVerts[i];
+        const gx = Math.floor(v[0] / cellSize);
+        const gy = Math.floor(v[1] / cellSize);
+        const gz = Math.floor(v[2] / cellSize);
         const cluster = [i];
-        for (let j = i + 1; j < rawVerts.length; j++) {
-          if (visited.has(j)) continue;
-          const d = Math.hypot(
-            rawVerts[i][0] - rawVerts[j][0],
-            rawVerts[i][1] - rawVerts[j][1],
-            rawVerts[i][2] - rawVerts[j][2]
-          );
-          if (d <= tolerance) {
-            cluster.push(j);
-            visited.add(j);
+
+        // Search 3x3x3 neighboring cells
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dz = -1; dz <= 1; dz++) {
+              const key = `${gx + dx}_${gy + dy}_${gz + dz}`;
+              const cellIndices = grid.get(key);
+              if (cellIndices) {
+                for (const j of cellIndices) {
+                  if (j === i || visited.has(j)) continue;
+                  const d = Math.hypot(
+                    v[0] - rawVerts[j][0],
+                    v[1] - rawVerts[j][1],
+                    v[2] - rawVerts[j][2]
+                  );
+                  if (d <= tolerance) {
+                    cluster.push(j);
+                    visited.add(j);
+                  }
+                }
+              }
+            }
           }
         }
+
         if (cluster.length > 1) {
           const cVerts = cluster.map(ci => rawVerts[ci]);
           const avg: V3 = [
-            cVerts.reduce((sum, v) => sum + v[0], 0) / cVerts.length,
-            cVerts.reduce((sum, v) => sum + v[1], 0) / cVerts.length,
-            cVerts.reduce((sum, v) => sum + v[2], 0) / cVerts.length,
+            cVerts.reduce((sum, cv) => sum + cv[0], 0) / cVerts.length,
+            cVerts.reduce((sum, cv) => sum + cv[1], 0) / cVerts.length,
+            cVerts.reduce((sum, cv) => sum + cv[2], 0) / cVerts.length,
           ];
           newVerts.push(avg);
           newHandles.push(oldHandles[i] || { out: [0,0,0], in: [0,0,0], broken: false });
@@ -5375,6 +5408,20 @@ export const useStore = create<Store>()((set, get) => ({
     let modifiedCount = 0;
     const matchedCounterparts = new Set<number>();
 
+    // Pre-index potential target vertices in a 3D spatial grid for fast O(1) neighbor lookups
+    const gridCell = Math.max(0.01, searchThreshold);
+    const targetGrid = new Map<string, number[]>();
+    for (let j = 0; j < n; j++) {
+      const pos = currentPositions[j];
+      const gx = Math.floor(pos[0] / gridCell);
+      const gy = Math.floor(pos[1] / gridCell);
+      const gz = Math.floor(pos[2] / gridCell);
+      const key = `${gx}_${gy}_${gz}`;
+      const list = targetGrid.get(key);
+      if (list) list.push(j);
+      else targetGrid.set(key, [j]);
+    }
+
     sourceIndices.forEach(srcIdx => {
       const srcPos = currentPositions[srcIdx];
 
@@ -5396,35 +5443,47 @@ export const useStore = create<Store>()((set, get) => ({
       const mirroredPos: V3 = [...srcPos];
       mirroredPos[axisIdx] = -srcPos[axisIdx];
 
-      // 3. Find closest opposite vertex counterpart
+      // 3. Find closest opposite vertex counterpart using spatial hash lookup
       let bestMatchIdx = -1;
       let minDistance = Infinity;
 
-      for (let j = 0; j < n; j++) {
-        if (j === srcIdx) continue;
-        if (matchedCounterparts.has(j)) continue;
+      const mgx = Math.floor(mirroredPos[0] / gridCell);
+      const mgy = Math.floor(mirroredPos[1] / gridCell);
+      const mgz = Math.floor(mirroredPos[2] / gridCell);
 
-        const posJ = currentPositions[j];
-        const dist = Math.hypot(
-          posJ[0] - mirroredPos[0],
-          posJ[1] - mirroredPos[1],
-          posJ[2] - mirroredPos[2]
-        );
+      const baseMirrored: V3 = [...verts[srcIdx]];
+      baseMirrored[axisIdx] = -verts[srcIdx][axisIdx];
 
-        // Topology rest position hint
-        const baseMirrored: V3 = [...verts[srcIdx]];
-        baseMirrored[axisIdx] = -verts[srcIdx][axisIdx];
-        const baseDist = Math.hypot(
-          verts[j][0] - baseMirrored[0],
-          verts[j][1] - baseMirrored[1],
-          verts[j][2] - baseMirrored[2]
-        );
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const key = `${mgx + dx}_${mgy + dy}_${mgz + dz}`;
+            const candidates = targetGrid.get(key);
+            if (!candidates) continue;
 
-        const score = dist * 0.7 + baseDist * 0.3;
+            for (const j of candidates) {
+              if (j === srcIdx || matchedCounterparts.has(j)) continue;
+              const posJ = currentPositions[j];
+              const dist = Math.hypot(
+                posJ[0] - mirroredPos[0],
+                posJ[1] - mirroredPos[1],
+                posJ[2] - mirroredPos[2]
+              );
 
-        if (score < minDistance && dist <= searchThreshold) {
-          minDistance = score;
-          bestMatchIdx = j;
+              if (dist <= searchThreshold) {
+                const baseDist = Math.hypot(
+                  verts[j][0] - baseMirrored[0],
+                  verts[j][1] - baseMirrored[1],
+                  verts[j][2] - baseMirrored[2]
+                );
+                const score = dist * 0.7 + baseDist * 0.3;
+                if (score < minDistance) {
+                  minDistance = score;
+                  bestMatchIdx = j;
+                }
+              }
+            }
+          }
         }
       }
 

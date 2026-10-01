@@ -45,6 +45,31 @@ import { createCameraVisualGroup, applyCameraLookAt, updateCameraTrackingVisual 
 import { ViewportHeader } from './viewport/ViewportHeader';
 import { ViewportNavigationControls } from './viewport/ViewportNavigationControls';
 import { ViewportInfoOverlay } from './viewport/ViewportInfoOverlay';
+import {
+  VERTEX_DOT_TEXTURE,
+  VERTEX_CROSS_TEXTURE,
+  SHARED_VERTEX_GEO,
+  SHARED_PICK_GEO,
+  SHARED_SNAP_RING_GEO,
+  SHARED_WHITE_MAT,
+  SHARED_SELECTED_MAT,
+  SHARED_START_MAT,
+  SHARED_ACTIVE_MAT,
+  SHARED_OUT_MAT,
+  SHARED_IN_MAT,
+  SHARED_SNAP_MAT,
+  SHARED_SNAP_DOT_MAT,
+  SHARED_PICK_MAT,
+  SHARED_CYAN_MAT,
+  SHARED_POINTS_MAT,
+  SHARED_SEL_POINTS_MAT,
+  SNAP_ANGLES_DEG,
+  snapAngleToPresets,
+  getAdaptiveHandleScale,
+} from './viewport/viewportConstants';
+import { computeGizmoLayout } from './viewport/viewportGizmoMath';
+import { useViewportGizmoCanvas } from './viewport/useViewportGizmoCanvas';
+import { createViewportCamera, handleFocusAllObjects } from './viewport/useViewportCameraControls';
 
 interface ViewportProps {
   type: ViewportType;
@@ -54,267 +79,13 @@ interface ViewportProps {
 // Initialize RectAreaLightUniformsLib globally
 RectAreaLightUniformsLib.init();
 
-const SNAP_ANGLES_DEG = [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240, 255, 270, 285, 300, 315, 330, 345, 360];
-
-const snapAngleToPresets = (angleRad: number): number => {
-  let deg = (angleRad * 180) / Math.PI;
-  const sign = Math.sign(deg) || 1;
-  let absDeg = Math.abs(deg);
-  const k = Math.floor(absDeg / 360);
-  const remDeg = absDeg - k * 360;
-
-  let closest = SNAP_ANGLES_DEG[0];
-  let minDiff = Math.abs(remDeg - closest);
-  for (let i = 1; i < SNAP_ANGLES_DEG.length; i++) {
-    const diff = Math.abs(remDeg - SNAP_ANGLES_DEG[i]);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closest = SNAP_ANGLES_DEG[i];
-    }
-  }
-  const snappedAbs = k * 360 + closest;
-  return sign * snappedAbs * (Math.PI / 180);
-};
-
 const safeLookAt = (object: THREE.Object3D, target: THREE.Vector3) => {
   applyCameraLookAt(object, target);
 };
 
-const computeGizmoLayout = (
-  gizmoPos: THREE.Vector3,
-  camera: THREE.Camera,
-  w: number,
-  h: number,
-  transformSpace: string = 'world',
-  selObj?: any,
-  customAxisLen?: number,
-  transformMode: string = 'universal'
-) => {
-  const projected = gizmoPos.clone().project(camera);
-  if (projected.z > 2 || projected.z < -2) return null;
-  const cx = (projected.x * 0.5 + 0.5) * w;
-  const cy = (-projected.y * 0.5 + 0.5) * h;
-  const AXIS_LEN = customAxisLen || Math.max(75, Math.min(Math.min(w, h) * 0.20, 120));
-
-  const isOrtho = (camera as any).isOrthographicCamera;
-  const camDir = new THREE.Vector3();
-  camera.getWorldDirection(camDir);
-  const eyeDir = isOrtho ? camDir.clone().negate() : camera.position.clone().sub(gizmoPos).normalize();
-
-  let vX = new THREE.Vector3(1, 0, 0);
-  let vY = new THREE.Vector3(0, 1, 0);
-  let vZ = new THREE.Vector3(0, 0, 1);
-
-  if (transformSpace === 'local' && selObj && selObj.transform) {
-    const euler = new THREE.Euler(selObj.transform.rotation[0], selObj.transform.rotation[1], selObj.transform.rotation[2], 'XYZ');
-    const q = new THREE.Quaternion().setFromEuler(euler);
-    vX.applyQuaternion(q);
-    vY.applyQuaternion(q);
-    vZ.applyQuaternion(q);
-  }
-
-  const axes = [
-    { axis: 'X', vec: vX, color: '#ef4444' },
-    { axis: 'Y', vec: vY, color: '#22c55e' },
-    { axis: 'Z', vec: vZ, color: '#3b82f6' }
-  ];
-
-  const dirs: Record<string, { nx: number; ny: number; color: string; sign: number; dot: number; worldDir: THREE.Vector3 }> = {};
-
-  const orthoCam = isOrtho ? (camera as THREE.OrthographicCamera) : null;
-  const worldPerPixel = orthoCam ? Math.abs(orthoCam.top - orthoCam.bottom) / ((orthoCam.zoom || 1) * Math.max(h, 1)) : 0.05;
-  const dist = camera.position.distanceTo(gizmoPos);
-  const worldScale = isOrtho ? worldPerPixel * AXIS_LEN : Math.max(0.1, dist * 0.12);
-
-  for (const { axis, vec, color } of axes) {
-    const dot = eyeDir.dot(vec);
-    const sign = (!isOrtho && dot < -0.05) ? -1 : 1;
-    const visVec = vec.clone().multiplyScalar(sign);
-
-    const projEnd = gizmoPos.clone().addScaledVector(visVec, worldScale).project(camera);
-    const ex = (projEnd.x * 0.5 + 0.5) * w;
-    const ey = (-projEnd.y * 0.5 + 0.5) * h;
-    const sdx = ex - cx;
-    const sdy = ey - cy;
-    const len = Math.sqrt(sdx * sdx + sdy * sdy);
-
-    const nx = len > 0.5 ? (sdx / len) * AXIS_LEN : 0;
-    const ny = len > 0.5 ? (sdy / len) * AXIS_LEN : 0;
-
-    dirs[axis] = { nx, ny, color, sign, dot, worldDir: vec.clone() };
-  }
-
-  const rotArcs: Record<string, { pts: { x: number; y: number }[]; handlePt: { x: number; y: number }; arcColor: string; sphereColor: string }> = {};
-
-  const arcConfigs = [
-    { rotAxis: 'Z', norm: vZ, color: '#3b82f6', sphereColor: '#60a5fa' },
-    { rotAxis: 'X', norm: vX, color: '#ef4444', sphereColor: '#f87171' },
-    { rotAxis: 'Y', norm: vY, color: '#22c55e', sphereColor: '#4ade80' }
-  ];
-
-  const rotRadiusRatio = transformMode === 'rotate' ? 1.05 : 0.72;
-  const radius3D = isOrtho ? worldPerPixel * (AXIS_LEN * rotRadiusRatio) : Math.max(0.12, dist * 0.12 * rotRadiusRatio);
-
-  for (const { rotAxis, norm, color, sphereColor } of arcConfigs) {
-    let projEye = eyeDir.clone().sub(norm.clone().multiplyScalar(eyeDir.dot(norm)));
-    if (projEye.lengthSq() < 1e-6) {
-      projEye = Math.abs(norm.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
-      projEye.sub(norm.clone().multiplyScalar(projEye.dot(norm)));
-    }
-    projEye.normalize();
-
-    const tangent = new THREE.Vector3().crossVectors(norm, projEye).normalize();
-
-    const pts: { x: number; y: number }[] = [];
-    const numSteps = 24;
-    for (let i = 0; i <= numSteps; i++) {
-      const theta = -Math.PI / 2 + (Math.PI * i) / numSteps;
-      const pt3D = gizmoPos.clone()
-        .addScaledVector(projEye, Math.cos(theta) * radius3D)
-        .addScaledVector(tangent, Math.sin(theta) * radius3D);
-      const proj = pt3D.project(camera);
-      pts.push({
-        x: (proj.x * 0.5 + 0.5) * w,
-        y: (-proj.y * 0.5 + 0.5) * h
-      });
-    }
-
-    const frontPt3D = gizmoPos.clone().addScaledVector(projEye, radius3D);
-    const frontProj = frontPt3D.project(camera);
-    const handlePt = {
-      x: (frontProj.x * 0.5 + 0.5) * w,
-      y: (-frontProj.y * 0.5 + 0.5) * h
-    };
-
-    rotArcs[rotAxis] = { pts, handlePt, arcColor: color, sphereColor };
-  }
-
-  return { cx, cy, AXIS_LEN, dirs, rotArcs };
-};
-
-// ── Shared Reusable Geometries and Materials (Ultra-low memory, zero per-frame allocation, compact micro-precision) ──
-const createVertexPointTexture = (shape: 'circle' | 'cross' = 'circle'): THREE.CanvasTexture => {
-  const size = 64;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
-  ctx.clearRect(0, 0, size, size);
-
-  if (shape === 'cross') {
-    // Crisp cross '+' / 'x' marker with high-contrast outline
-    ctx.lineWidth = 11;
-    ctx.strokeStyle = '#09090b';
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(15, 15); ctx.lineTo(49, 49);
-    ctx.moveTo(49, 15); ctx.lineTo(15, 49);
-    ctx.stroke();
-
-    ctx.lineWidth = 6;
-    ctx.strokeStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(15, 15); ctx.lineTo(49, 49);
-    ctx.moveTo(49, 15); ctx.lineTo(15, 49);
-    ctx.stroke();
-  } else {
-    // Crisp circular dot with high-contrast dark border
-    ctx.beginPath();
-    ctx.arc(32, 32, 22, 0, Math.PI * 2);
-    ctx.fillStyle = '#ffffff';
-    ctx.fill();
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = '#09090b';
-    ctx.stroke();
-  }
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.needsUpdate = true;
-  return tex;
-};
-
-const VERTEX_DOT_TEXTURE = typeof document !== 'undefined' ? createVertexPointTexture('circle') : null;
-const VERTEX_CROSS_TEXTURE = typeof document !== 'undefined' ? createVertexPointTexture('cross') : null;
-if (VERTEX_DOT_TEXTURE) VERTEX_DOT_TEXTURE.userData = { isShared: true };
-if (VERTEX_CROSS_TEXTURE) VERTEX_CROSS_TEXTURE.userData = { isShared: true };
-
-const SHARED_VERTEX_GEO = new THREE.SphereGeometry(1, 6, 5);
-SHARED_VERTEX_GEO.userData = { isShared: true };
-const SHARED_PICK_GEO = new THREE.SphereGeometry(1, 6, 4);
-SHARED_PICK_GEO.userData = { isShared: true };
-const SHARED_SNAP_RING_GEO = new THREE.RingGeometry(0.02, 0.032, 16);
-SHARED_SNAP_RING_GEO.userData = { isShared: true };
-
-const SHARED_WHITE_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
-SHARED_WHITE_MAT.userData = { isShared: true };
-const SHARED_SELECTED_MAT = new THREE.MeshBasicMaterial({ color: 0xef4444, depthTest: false });
-SHARED_SELECTED_MAT.userData = { isShared: true };
-const SHARED_START_MAT = new THREE.MeshBasicMaterial({ color: 0x10b981, depthTest: false });
-SHARED_START_MAT.userData = { isShared: true };
-const SHARED_ACTIVE_MAT = new THREE.MeshBasicMaterial({ color: 0xef4444, depthTest: false });
-SHARED_ACTIVE_MAT.userData = { isShared: true };
-const SHARED_OUT_MAT = new THREE.MeshBasicMaterial({ color: 0x3b82f6, depthTest: false });
-SHARED_OUT_MAT.userData = { isShared: true };
-const SHARED_IN_MAT = new THREE.MeshBasicMaterial({ color: 0x22c55e, depthTest: false });
-SHARED_IN_MAT.userData = { isShared: true };
-const SHARED_SNAP_MAT = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.9 });
-SHARED_SNAP_MAT.userData = { isShared: true };
-const SHARED_SNAP_DOT_MAT = new THREE.MeshBasicMaterial({ color: 0x00ffcc, depthTest: false });
-SHARED_SNAP_DOT_MAT.userData = { isShared: true };
-const SHARED_PICK_MAT = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
-SHARED_PICK_MAT.userData = { isShared: true };
-const SHARED_CYAN_MAT = new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false });
-SHARED_CYAN_MAT.userData = { isShared: true };
-
-// Screen-space 2D Points Materials with constant pixel size (virtually 0 CPU/GPU cost, never scales up on zoom)
-const SHARED_POINTS_MAT = new THREE.PointsMaterial({
-  size: 7.5,
-  sizeAttenuation: false,
-  map: VERTEX_DOT_TEXTURE ?? undefined,
-  vertexColors: true,
-  transparent: true,
-  alphaTest: 0.05,
-  depthTest: false,
-});
-SHARED_POINTS_MAT.userData = { isShared: true };
-
-const SHARED_SEL_POINTS_MAT = new THREE.PointsMaterial({
-  size: 9.5,
-  sizeAttenuation: false,
-  map: VERTEX_DOT_TEXTURE ?? undefined,
-  color: 0xf59e0b,
-  transparent: true,
-  alphaTest: 0.05,
-  depthTest: false,
-});
-SHARED_SEL_POINTS_MAT.userData = { isShared: true };
-
-/**
- * Calcula un tamaño de escala constante en píxeles de pantalla para punteros, indicadores y halos
- * independientemente de si el usuario hace zoom extremo (acercarse o alejarse)
- */
-const getAdaptiveHandleScale = (
-  worldPos: THREE.Vector3,
-  camera: THREE.Camera,
-  viewportHeight: number,
-  pixelRadius: number,
-  minScale = 0.0005,
-  maxScale = 0.05
-) => {
-  if ((camera as any).isPerspectiveCamera) {
-    const pCam = camera as THREE.PerspectiveCamera;
-    const dist = camera.position.distanceTo(worldPos);
-    const vFov = THREE.MathUtils.degToRad(pCam.fov);
-    const worldPerPixel = (2 * dist * Math.tan(vFov * 0.5)) / Math.max(200, viewportHeight || 800);
-    return Math.max(minScale, Math.min(maxScale, worldPerPixel * pixelRadius));
-  } else if ((camera as any).isOrthographicCamera) {
-    const oCam = camera as THREE.OrthographicCamera;
-    const worldPerPixel = (oCam.top - oCam.bottom) / (Math.max(200, viewportHeight || 800) * (oCam.zoom || 1));
-    return Math.max(minScale, Math.min(maxScale, worldPerPixel * pixelRadius));
-  }
-  return 0.012;
+const safeParseFixed = (val: number, digits: number = 3, def: number = 0): number => {
+  const n = Number(val);
+  return isNaN(n) ? def : Number(n.toFixed(digits));
 };
 
 export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType, title: initialTitle }) => {
@@ -447,17 +218,38 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   (window as any).__getObjectRealBox = getObjectRealBox;
   (window as any).__viewportCamera = () => cameraRef.current;
 
+  const geometrySpatialMapCache = useRef(new WeakMap<THREE.BufferGeometry, { version: number; map: Map<string, number[]> }>());
+
   const getCoincidentVertices = (geometry: THREE.BufferGeometry, index: number): number[] => {
     const pos = geometry.getAttribute('position');
     if (!pos || index >= pos.count) return [index];
-    const x = pos.getX(index), y = pos.getY(index), z = pos.getZ(index);
-    const out: number[] = [];
-    for (let i = 0; i < pos.count; i++) {
-      if (Math.abs(pos.getX(i) - x) < 0.0001 && Math.abs(pos.getY(i) - y) < 0.0001 && Math.abs(pos.getZ(i) - z) < 0.0001) {
-        out.push(i);
+
+    let cache = geometrySpatialMapCache.current.get(geometry);
+    const currentVersion = (geometry as any).version || (geometry.getAttribute('position') as any)?.version || 0;
+
+    if (!cache || cache.version !== currentVersion) {
+      const map = new Map<string, number[]>();
+      for (let i = 0; i < pos.count; i++) {
+        const qx = Math.round(pos.getX(i) * 5000);
+        const qy = Math.round(pos.getY(i) * 5000);
+        const qz = Math.round(pos.getZ(i) * 5000);
+        const key = `${qx},${qy},${qz}`;
+        const list = map.get(key);
+        if (list) {
+          list.push(i);
+        } else {
+          map.set(key, [i]);
+        }
       }
+      cache = { version: currentVersion, map };
+      geometrySpatialMapCache.current.set(geometry, cache);
     }
-    return out.length > 0 ? out : [index];
+
+    const qx = Math.round(pos.getX(index) * 5000);
+    const qy = Math.round(pos.getY(index) * 5000);
+    const qz = Math.round(pos.getZ(index) * 5000);
+    const key = `${qx},${qy},${qz}`;
+    return cache.map.get(key) || [index];
   };
   
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
@@ -511,30 +303,51 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     meshMatrix: THREE.Matrix4;
   } | null>(null);
 
-  const { 
-    project, currentTime, viewMode, setViewMode, selectedObjectId, selectedObjectIds, selectObject,
-    selectedLightId, selectLight, selectedCameraId, selectCamera,
-    toggleObjectSelection, editMode, transformMode, setTransformMode, transformSpace,
-    drawMode, setDrawMode, addShape, updateBezierHandle,
+  // ── Fine-grained Zustand selectors to prevent broad unnecessary re-renders ──
+  const project = useStore(s => s.project);
+  const viewMode = useStore(s => s.viewMode);
+  const selectedObjectId = useStore(s => s.selectedObjectId);
+  const selectedObjectIds = useStore(s => s.selectedObjectIds);
+  const selectedLightId = useStore(s => s.selectedLightId);
+  const selectedCameraId = useStore(s => s.selectedCameraId);
+  const editMode = useStore(s => s.editMode);
+  const transformMode = useStore(s => s.transformMode);
+  const transformSpace = useStore(s => s.transformSpace);
+  const drawMode = useStore(s => s.drawMode);
+  const activeViewport = useStore(s => s.activeViewport);
+  const maximizedViewport = useStore(s => s.maximizedViewport);
+  const selectedVertexIndices = useStore(s => s.selectedVertexIndices);
+  const selectedFaceIndices = useStore(s => s.selectedFaceIndices);
+  const selectedEdgeIndices = useStore(s => s.selectedEdgeIndices);
+  const selectedGLTFMeshes = useStore(s => s.selectedGLTFMeshes);
+  const isolateGLTFSelection = useStore(s => s.isolateGLTFSelection);
+  const gridSnapEnabled = useStore(s => s.gridSnapEnabled);
+  const isRecording = useStore(s => s.isRecording);
+  const faceSnapConfig = useStore(s => s.faceSnapConfig);
+  const moveReferenceMode = useStore(s => s.moveReferenceMode);
+  const insertVertexMode = useStore(s => s.insertVertexMode);
+  const loopCutMode = useStore(s => s.loopCutMode);
+  const loopCutCuts = useStore(s => s.loopCutCuts);
+  const loopCutSlide = useStore(s => s.loopCutSlide);
+  const orthoDrawMode = useStore(s => s.orthoDrawMode);
+  const drawLockAxis = useStore(s => s.drawLockAxis);
+  const latheConfig = useStore(s => s.latheConfig);
+
+  // Stable action references (never trigger re-renders on state changes)
+  const {
+    setViewMode, selectObject, selectLight, selectCamera,
+    toggleObjectSelection, setTransformMode, setDrawMode, addShape, updateBezierHandle,
     updateVertexOffset, updateVertexOffsets, updateObject, updateObjects,
-    activeViewport, setActiveViewport, selectedVertexIndices, setSelectedVertexIndices,
-    addSelectedVertexIndices, selectedFaceIndices, setSelectedFaceIndices,
-    selectedEdgeIndices, setSelectedEdgeIndices, selectedGLTFMeshes, setSelectedGLTFMeshes,
-    isolateGLTFSelection, clearSelection,
-    maximizedViewport, setMaximizedViewport, saveHistory,
-    gridSnapEnabled, setGridSnapEnabled, isRecording,
-    faceSnapConfig, setFaceSnapConfig, toggleFaceSnap,
-    setSilueta, moveReferenceMode, setReference,
-    addMaterial, assignMaterialToObjects,
-    insertVertexMode, setInsertVertexMode,
-    loopCutMode, setLoopCutMode,
-    loopCutCuts, setLoopCutCuts,
-    loopCutSlide, setLoopCutSlide,
-    applyLoopCut, extrudeManifold,
-    orthoDrawMode, setOrthoDrawMode,
-    drawLockAxis, setDrawLockAxis,
-    latheConfig, setLatheConfig, updateLatheAxisPos,
-  } = useStore();
+    setActiveViewport, setSelectedVertexIndices, addSelectedVertexIndices, setSelectedFaceIndices,
+    setSelectedEdgeIndices, setSelectedGLTFMeshes, clearSelection,
+    setMaximizedViewport, saveHistory, setGridSnapEnabled, setFaceSnapConfig, toggleFaceSnap,
+    setSilueta, setReference, addMaterial, assignMaterialToObjects,
+    setInsertVertexMode, setLoopCutMode, setLoopCutCuts, setLoopCutSlide,
+    applyLoopCut, extrudeManifold, setOrthoDrawMode, setDrawLockAxis,
+    setLatheConfig, updateLatheAxisPos,
+  } = useStore.getState();
+
+  const currentTime = useStore.getState().currentTime;
   const silueta = project?.silueta || ({} as any);
 
   // Lathe axis dragging ref
@@ -749,7 +562,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     // 2. Fallback: calculate bounding box from procedural vertices
     if (!expanded) {
       activeObjects.forEach(obj => {
-        const _interp = getInterpolatedTransform(obj, currentTime);
+        const _interp = getInterpolatedTransform(obj, useStore.getState().currentTime);
         const mat4 = new THREE.Matrix4().compose(
           new THREE.Vector3().fromArray(_interp.position),
           new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
@@ -818,8 +631,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         orthoCam.up.set(0, 1, 0);
       }
 
-      orthoCam.near = -distOffset * 2;
-      orthoCam.far  = distOffset * 2;
+      orthoCam.near = 0.1;
+      orthoCam.far  = Math.max(distOffset * 2.5, 1000);
       orthoCam.lookAt(center);
 
       // Adjust orthographic zoom to fit bounding box
@@ -1155,7 +968,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     camera.add(editorHeadlight);
     scene.add(camera);
 
-    const shouldEnableShadows = (type === 'PERSPECTIVE' || type === 'CAMERA') && viewMode !== 'WIREFRAME' && viewMode !== 'FLAT';
+    const shouldEnableShadows = (type === 'PERSPECTIVE' || type === 'CAMERA') && viewMode !== 'WIREFRAME';
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: false,
@@ -1212,28 +1025,14 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       }
     }
 
-    // Update last camera state for rendering and persistence
-    const updateCamState = () => {
+    // Update camera state for persistence (decoupling continuous 60fps damping from React store updates)
+    let camStateTimeoutId: number | null = null;
+    let lastCamSyncTime = 0;
+
+    // Transient sync during navigation (updates only lightweight viewport state)
+    const syncTransientCamState = () => {
       const state = useStore.getState();
       const pos = camera.position.toArray() as V3;
-      const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'XYZ');
-      const rot: V3 = [euler.x, euler.y, euler.z];
-      
-      if (type === 'CAMERA' && viewCameraId) {
-        const camData = state.project.cameras?.find(c => c.id === viewCameraId);
-        if (camData) {
-          const updates: any = {
-            transform: {
-              ...camData.transform,
-              position: pos,
-              ...(camData.targetObjectId ? {} : { rotation: rot })
-            }
-          };
-          state.updateCamera(viewCameraId, updates);
-        }
-        return;
-      }
-      
       const target = controls.target.toArray() as V3;
       const zoom = (camera as any).zoom || 1;
       const pFov = (camera as THREE.PerspectiveCamera).fov || 45;
@@ -1245,10 +1044,60 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       state.setViewportCamera(type, cameraState);
     };
 
-    // Emit initial camera state
-    updateCamState();
+    // Commits camera state to persistent project when navigation gesture ends or pauses
+    const flushCamState = () => {
+      if (camStateTimeoutId !== null) {
+        window.clearTimeout(camStateTimeoutId);
+        camStateTimeoutId = null;
+      }
+      lastCamSyncTime = performance.now();
 
-    controls.addEventListener('change', updateCamState);
+      const state = useStore.getState();
+      const pos = camera.position.toArray() as V3;
+      const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'XYZ');
+      const rot: V3 = [euler.x, euler.y, euler.z];
+      
+      if (type === 'CAMERA' && viewCameraId) {
+        const camData = state.project.cameras?.find(c => c.id === viewCameraId);
+        if (camData) {
+          const prevPos = camData.transform.position;
+          const prevRot = camData.transform.rotation;
+          const posDiff = Math.hypot(pos[0] - prevPos[0], pos[1] - prevPos[1], pos[2] - prevPos[2]);
+          const rotDiff = Math.hypot(rot[0] - prevRot[0], rot[1] - prevRot[1], rot[2] - prevRot[2]);
+          
+          // Only commit persistent store update if camera transformation actually moved
+          if (posDiff > 0.0005 || (!camData.targetObjectId && rotDiff > 0.0005)) {
+            const updates: any = {
+              transform: {
+                ...camData.transform,
+                position: pos,
+                ...(camData.targetObjectId ? {} : { rotation: rot })
+              }
+            };
+            state.updateCamera(viewCameraId, updates);
+          }
+        }
+        return;
+      }
+      
+      syncTransientCamState();
+    };
+
+    const scheduleCamStateSync = () => {
+      syncTransientCamState();
+      const now = performance.now();
+      // Debounce persistent project commit until damping settles
+      if (camStateTimeoutId !== null) {
+        window.clearTimeout(camStateTimeoutId);
+      }
+      camStateTimeoutId = window.setTimeout(flushCamState, 120);
+    };
+
+    // Emit initial camera state
+    syncTransientCamState();
+
+    controls.addEventListener('change', scheduleCamStateSync);
+    controls.addEventListener('end', flushCamState);
 
     const handleContextLost = (event: Event) => {
       event.preventDefault();
@@ -1270,9 +1119,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
     renderer.render(scene, camera);
     return () => {
+      if (camStateTimeoutId !== null) window.clearTimeout(camStateTimeoutId);
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored);
-      controls.removeEventListener('change', updateCamState);
+      controls.removeEventListener('change', scheduleCamStateSync);
+      controls.removeEventListener('end', flushCamState);
       if (controlsRef.current) {
         controlsRef.current.dispose();
         controlsRef.current = null;
@@ -1295,7 +1146,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   // ── Dynamic ShadowMap Toggle based on viewMode ────────────────────────────
   useEffect(() => {
     if (!rendererRef.current) return;
-    const shouldEnable = (type === 'PERSPECTIVE' || type === 'CAMERA') && viewMode !== 'WIREFRAME' && viewMode !== 'FLAT';
+    const shouldEnable = (type === 'PERSPECTIVE' || type === 'CAMERA') && viewMode !== 'WIREFRAME';
     if (rendererRef.current.shadowMap.enabled !== shouldEnable) {
       rendererRef.current.shadowMap.enabled = shouldEnable;
       rendererRef.current.shadowMap.needsUpdate = true;
@@ -1439,13 +1290,13 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     camerasRef.current.clear();
 
     (project.cameras || []).forEach(cData => {
-      const { selectedCameraId } = useStore.getState();
+      const { selectedCameraId, currentTime: currTime } = useStore.getState();
       const isSelected = selectedCameraId === cData.id;
 
       // Create visual group for the camera
       const camGroup = createCameraVisualGroup(cData, isSelected);
 
-      const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
+      const evalCam = evaluateCameraTransform(cData, project.objects, currTime, project.duration || 5);
       camGroup.position.copy(evalCam.position);
       if (evalCam.target) {
         applyCameraLookAt(camGroup, evalCam.target);
@@ -1976,6 +1827,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   // ── 2. Scene sync — builds geometry from vertices/faces (unified mesh) ───
   useEffect(() => {
     let isEffectCancelled = false;
+    const currentTime = useStore.getState().currentTime;
     const group = groupRef.current;
     const primitivesGroup = primitivesGroupRef.current;
     if (!group || !primitivesGroup) return;
@@ -5159,7 +5011,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           if (hitVtxIdx === null && selObj && selObj.vertices && selObj.vertices.length > 0) {
             const meshObj = primitivesGroupRef.current?.children.find(c => (c as any).userData?.id === selectedObjectId) as THREE.Mesh | undefined;
             const mat4 = meshObj ? meshObj.matrixWorld : (() => {
-              const _interp = getInterpolatedTransform(selObj, currentTime);
+              const _interp = getInterpolatedTransform(selObj, useStore.getState().currentTime);
               return new THREE.Matrix4().compose(
                 new THREE.Vector3().fromArray(_interp.position),
                 new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
@@ -5175,21 +5027,30 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             let closestIdx: number | null = null;
             let closestWorldPt: THREE.Vector3 | null = null;
 
+            const tempV = new THREE.Vector3();
+            const tempNDC = new THREE.Vector3();
+            const cam = cameraRef.current!;
+
             for (let i = 0; i < selObj.vertices.length; i++) {
               const v = selObj.vertices[i];
-              const off = selObj.vertexOffsets?.[i] || [0, 0, 0];
-              const worldPt = new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
-              const p_ndc = worldPt.clone().project(cameraRef.current!);
-              if (p_ndc.z > 1) continue;
+              const off = selObj.vertexOffsets?.[i];
+              if (off) {
+                tempV.set(v[0] + off[0], v[1] + off[1], v[2] + off[2]);
+              } else {
+                tempV.set(v[0], v[1], v[2]);
+              }
+              tempV.applyMatrix4(mat4);
+              tempNDC.copy(tempV).project(cam);
+              if (tempNDC.z > 1) continue;
 
-              const sx = (p_ndc.x * 0.5 + 0.5) * rect.width;
-              const sy = (p_ndc.y * -0.5 + 0.5) * rect.height;
+              const sx = (tempNDC.x * 0.5 + 0.5) * rect.width;
+              const sy = (tempNDC.y * -0.5 + 0.5) * rect.height;
               const dist = Math.hypot(clickScreenX - sx, clickScreenY - sy);
 
               if (dist < closestDist) {
                 closestDist = dist;
                 closestIdx = i;
-                closestWorldPt = worldPt;
+                closestWorldPt = tempV.clone();
               }
             }
 

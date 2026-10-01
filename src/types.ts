@@ -798,6 +798,7 @@ export interface AppState {
   setDrawLockAxis: (axis: 'FREE' | 'ORTHO_90' | 'X' | 'Y' | 'Z') => void;
   insertVertexMode: boolean;
   setInsertVertexMode: (enabled: boolean) => void;
+  toggleInsertVertexMode: (enabled?: boolean) => void;
   loopCutMode: boolean;
   setLoopCutMode: (enabled: boolean) => void;
   loopCutCuts: number;

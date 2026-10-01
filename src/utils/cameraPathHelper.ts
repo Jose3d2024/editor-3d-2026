@@ -6,11 +6,31 @@ function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
 }
 
+// WeakMap cache for sorted keyframes by keyframes array reference
+const sortedKeyframesCache = new WeakMap<any[], any[]>();
+
+function getSortedKeyframes(kfs: any[]): any[] {
+  let sorted = sortedKeyframesCache.get(kfs);
+  if (!sorted) {
+    // Check if already sorted in ascending order
+    let isSorted = true;
+    for (let i = 0; i < kfs.length - 1; i++) {
+      if (kfs[i].time > kfs[i + 1].time) {
+        isSorted = false;
+        break;
+      }
+    }
+    sorted = isSorted ? kfs : [...kfs].sort((a, b) => a.time - b.time);
+    sortedKeyframesCache.set(kfs, sorted);
+  }
+  return sorted;
+}
+
 /** Interpolates keyframed object transform at a given time */
 export function getInterpolatedTransformAtTime(obj: CSGObject, time: number) {
   const kfs = obj.keyframes;
   if (!kfs || kfs.length === 0) return obj.transform;
-  const sorted = [...kfs].sort((a, b) => a.time - b.time);
+  const sorted = getSortedKeyframes(kfs);
   if (time <= sorted[0].time) return sorted[0].transform;
   if (time >= sorted[sorted.length - 1].time) return sorted[sorted.length - 1].transform;
   let prev = sorted[0], next = sorted[0];
@@ -19,13 +39,28 @@ export function getInterpolatedTransformAtTime(obj: CSGObject, time: number) {
       prev = sorted[i]; next = sorted[i + 1]; break;
     }
   }
-  const t = (time - prev.time) / (next.time - prev.time);
+  const dt = next.time - prev.time;
+  const t = dt > 0 ? (time - prev.time) / dt : 0;
   return {
-    position: [0, 1, 2].map(i => lerp(prev.transform.position[i], next.transform.position[i], t)) as V3,
-    rotation: [0, 1, 2].map(i => lerp(prev.transform.rotation[i], next.transform.rotation[i], t)) as V3,
-    scale:    [0, 1, 2].map(i => lerp(prev.transform.scale[i],    next.transform.scale[i],    t)) as V3,
+    position: [
+      lerp(prev.transform.position[0], next.transform.position[0], t),
+      lerp(prev.transform.position[1], next.transform.position[1], t),
+      lerp(prev.transform.position[2], next.transform.position[2], t),
+    ] as V3,
+    rotation: [
+      lerp(prev.transform.rotation[0], next.transform.rotation[0], t),
+      lerp(prev.transform.rotation[1], next.transform.rotation[1], t),
+      lerp(prev.transform.rotation[2], next.transform.rotation[2], t),
+    ] as V3,
+    scale: [
+      lerp(prev.transform.scale[0], next.transform.scale[0], t),
+      lerp(prev.transform.scale[1], next.transform.scale[1], t),
+      lerp(prev.transform.scale[2], next.transform.scale[2], t),
+    ] as V3,
   };
 }
+
+export const getInterpolatedTransform = getInterpolatedTransformAtTime;
 
 /** Gets world space position of an object at a given time */
 export function getObjectWorldPositionAtTime(obj: CSGObject, time: number): THREE.Vector3 {
@@ -90,14 +125,11 @@ export function samplePathObjectAtProgress(pathObj: CSGObject, progress: number,
   }
 
   // Convert to world points
-  const worldPoints = localVertices.map(v => {
-    const pt = new THREE.Vector3(v[0], v[1], v[2]);
-    if (pathObj.vertexOffsets) {
-      // Add vertex offsets if present
-      const idx = localVertices.indexOf(v);
-      const off = pathObj.vertexOffsets[idx];
-      if (off) pt.add(new THREE.Vector3(off[0], off[1], off[2]));
-    }
+  const worldPoints = localVertices.map((v, idx) => {
+    const off = pathObj.vertexOffsets?.[idx];
+    const pt = off
+      ? new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2])
+      : new THREE.Vector3(v[0], v[1], v[2]);
     return pt.applyMatrix4(mat);
   });
 
