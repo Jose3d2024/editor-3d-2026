@@ -455,6 +455,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   const drawingMeshRef = useRef<THREE.Object3D | null>(null);
   const drawingPreviewPointRef = useRef<THREE.Vector3 | null>(null);
   const isDrawingHandleRef = useRef(false);
+  const isFreehandDrawingRef = useRef(false);
+  const previewRafIdRef = useRef<number | null>(null);
   const finishStrokeRef = useRef<((snapResult: any) => void) | null>(null);
   const updatePreviewRef = useRef<(() => void) | null>(null);
 
@@ -513,9 +515,13 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     loopCutSlide, setLoopCutSlide,
     applyLoopCut, extrudeManifold,
     orthoDrawMode, setOrthoDrawMode,
-    drawLockAxis, setDrawLockAxis
+    drawLockAxis, setDrawLockAxis,
+    latheConfig, setLatheConfig, updateLatheAxisPos,
   } = useStore();
   const silueta = project?.silueta || ({} as any);
+
+  // Lathe axis dragging ref
+  const isDraggingLatheAxisRef = useRef(false);
 
   // Silueta interaction refs
   const siluetaDragRef = useRef<{ planeKey: 'front'|'back'|'left'|'right'|'top'|'bottom'; pointIndex: number } | null>(null);
@@ -1151,12 +1157,15 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
     scene.background = new THREE.Color(0x1a1a1a);
 
-    // ALL viewports get OrbitControls — perspective, orthographic, and camera views get full rotate+pan+zoom
+    // Planar orthographic views (TOP, BOTTOM, FRONT, BACK, LEFT, RIGHT) lock to the 2D working plane (Pan with Left/Right drag, Zoom with wheel, NO 3D tilting/rotation)
+    const isPlanarOrtho = type !== 'PERSPECTIVE' && type !== 'CAMERA';
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping  = true;
     controls.dampingFactor  = 0.1;
-    controls.enableRotate   = true;
-    controls.mouseButtons   = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    controls.enableRotate   = !isPlanarOrtho;
+    controls.mouseButtons   = isPlanarOrtho
+      ? { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
+      : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
     controls.screenSpacePanning = true;
     if (initialCamTarget) {
       controls.target.copy(initialCamTarget);
@@ -2507,10 +2516,9 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             curveLine = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: objColor, linewidth: 2 }));
           } else if (isBezier && ctrlPts.length >= 2) {
             // FIX: For bezier without handles yet, auto-smooth and render as proper bezier
-            // (no more CatmullRom fallback that produces wrong curves)
             const allCurvePoints2: THREE.Vector3[] = [];
             const segCount = obj.parameters.segments ?? 20;
-            const handles2 = obj.bezierHandles!;
+            const handles2 = obj.bezierHandles || [];
             const loopCount = obj.parameters.closed ? ctrlPts.length : ctrlPts.length - 1;
             for (let i = 0; i < loopCount; i++) {
               const i1 = (i + 1) % ctrlPts.length;
@@ -3573,7 +3581,17 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         }
 
         let curveLine;
-        if (handles.length > 0 && points.length > 1) {
+        if (drawMode === 'smooth' && points.length >= 2) {
+          const spline = new THREE.CatmullRomCurve3(points, false, 'centripetal');
+          const curvePts = spline.getPoints(Math.max(24, (points.length - 1) * 12));
+          const geometry = new THREE.BufferGeometry().setFromPoints(curvePts);
+          curveLine = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0x06b6d4, linewidth: 2 }));
+        } else if (drawMode === 'freehand' && points.length >= 2) {
+          const spline = new THREE.CatmullRomCurve3(points, false, 'centripetal');
+          const curvePts = spline.getPoints(Math.max(20, points.length * 4));
+          const geometry = new THREE.BufferGeometry().setFromPoints(curvePts);
+          curveLine = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 2 }));
+        } else if (handles.length > 0 && points.length > 1) {
             const allCurvePoints: THREE.Vector3[] = [];
             const count = points.length - 1;
             for (let i = 0; i < count; i++) {
@@ -3782,15 +3800,17 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       const vertices = pts.map(p => toV3(p));
       const handles  = hnds;
 
+      const effectiveShapeType = (drawMode === 'smooth' || drawMode === 'freehand') ? 'bezier' : (drawMode || 'line');
+
       if (drawingObjectIdRef.current && drawingObjectIdRef.current !== '__CURRENT__') {
         const existObj = projectRef.current.objects.find(o => o.id === drawingObjectIdRef.current);
         useStore.getState().updateObject(drawingObjectIdRef.current, {
           vertices,
           bezierHandles: handles,
-          parameters: { ...existObj?.parameters, closed: closeShape, shapeType: drawMode as any },
+          parameters: { ...existObj?.parameters, closed: closeShape, shapeType: effectiveShapeType as any },
         } as any);
       } else {
-        addShape(drawMode as 'line' | 'bezier', vertices, closeShape, handles);
+        addShape(drawMode as any, vertices, closeShape, handles);
       }
 
       drawingPointsRef.current       = [];
@@ -3800,6 +3820,14 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       updatePreview();
       useStore.getState().setDrawMode(null);
       useStore.getState().saveHistory();
+    };
+
+    const schedulePreviewUpdate = () => {
+      if (previewRafIdRef.current !== null) return;
+      previewRafIdRef.current = requestAnimationFrame(() => {
+        previewRafIdRef.current = null;
+        updatePreview();
+      });
     };
 
     finishStrokeRef.current = finishStroke;
@@ -3914,6 +3942,18 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       if (now - last < 260) { (onPointerDown as any)._skipOne = true; return; }
       if ((onPointerDown as any)._skipOne) { (onPointerDown as any)._skipOne = false; return; }
 
+      // ── FREEHAND mode ──────────────────────────────────────────────────────
+      if (drawMode === 'freehand') {
+        const point = getPoint(e);
+        if (!point) return;
+        isFreehandDrawingRef.current = true;
+        drawingPointsRef.current = [point];
+        drawingHandlesRef.current = [{ out: [0,0,0], in: [0,0,0], broken: false }];
+        schedulePreviewUpdate();
+        try { (e.target as Element).setPointerCapture(e.pointerId); } catch {}
+        return;
+      }
+
       // ── RECT mode ─────────────────────────────────────────────────────────
       if (drawMode === 'rect') {
         const point = getPoint(e);
@@ -3936,7 +3976,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         return;
       }
 
-      // ── LINE / BEZIER mode ────────────────────────────────────────────────
+      // ── LINE / BEZIER / SMOOTH mode ───────────────────────────────────────
       const snap = findSnapEndpoint(e.clientX, e.clientY);
 
       // ── CASE A: Nothing drawn yet — start from a snap point OR free click ──
@@ -3963,7 +4003,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             drawingPointsRef.current  = verts;
             drawingHandlesRef.current = handles;
           }
-          updatePreview();
+          schedulePreviewUpdate();
           return;
         }
 
@@ -3977,6 +4017,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           // Capture pointer: mousemove keeps firing even outside the canvas
           try { (e.target as Element).setPointerCapture(e.pointerId); } catch {}
         }
+        schedulePreviewUpdate();
         return;
       }
 
@@ -4018,6 +4059,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         isDrawingHandleRef.current = true;
         try { (e.target as Element).setPointerCapture(e.pointerId); } catch {}
       }
+      schedulePreviewUpdate();
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -4040,6 +4082,20 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         return;
       }
 
+      // ── FREEHAND drag tracking ────────────────────────────────────────────
+      if (isFreehandDrawingRef.current && drawMode === 'freehand') {
+        e.stopPropagation();
+        const point = getPoint(e);
+        if (!point) return;
+        const lastPt = drawingPointsRef.current[drawingPointsRef.current.length - 1];
+        if (!lastPt || lastPt.distanceTo(point) > 0.06) {
+          drawingPointsRef.current.push(point);
+          drawingHandlesRef.current.push({ out: [0,0,0], in: [0,0,0], broken: false });
+          schedulePreviewUpdate();
+        }
+        return;
+      }
+
       if (isDrawingHandleRef.current && drawMode === 'bezier') {
         e.stopPropagation();
         const point = getPoint(e);
@@ -4049,7 +4105,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         const diff    = point.clone().sub(anchor);
         drawingHandlesRef.current[lastIdx].out = [diff.x, diff.y, diff.z];
         drawingHandlesRef.current[lastIdx].in  = [-diff.x, -diff.y, -diff.z];
-        updatePreview();
+        schedulePreviewUpdate();
         return;
       }
 
@@ -4066,7 +4122,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         if (point) drawingPreviewPointRef.current = point;
         (drawingPreviewPointRef as any)._snapping = false;
       }
-      updatePreview();
+      schedulePreviewUpdate();
     };
 
     const onPointerUp = (_e: PointerEvent) => {
@@ -4091,14 +4147,23 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       if (!drawMode) return;
       _e.stopPropagation();
 
+      if (isFreehandDrawingRef.current && drawMode === 'freehand') {
+        isFreehandDrawingRef.current = false;
+        try { (_e.target as Element).releasePointerCapture(_e.pointerId); } catch {}
+        if (drawingPointsRef.current.length >= 2) {
+          finishStroke(null);
+        }
+        return;
+      }
+
       if (isDrawingHandleRef.current) {
         isDrawingHandleRef.current = false;
-        updatePreview();
+        schedulePreviewUpdate();
       }
     };
 
     const onDblClick = (_e: PointerEvent) => {
-      if ((drawMode === 'line' || drawMode === 'bezier') && drawingPointsRef.current.length > 1) {
+      if ((drawMode === 'line' || drawMode === 'bezier' || drawMode === 'smooth' || drawMode === 'polyline') && drawingPointsRef.current.length > 1) {
         // Reset double-click guard
         (onPointerDown as any)._lastMs  = 0;
         (onPointerDown as any)._skipOne = false;
@@ -4131,6 +4196,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       if (pts.length >= 2) {
         const first = pts[0];
         finishStroke({ objId: '__CURRENT__', anchorIdx: 0, worldPos: first, isOwnStart: true });
+      } else if (selectedObjectId) {
+        useStore.getState().toggleShapeClosed(selectedObjectId);
+        useStore.getState().setDrawMode(null);
+      } else {
+        useStore.getState().setDrawMode(null);
       }
     };
 
@@ -4140,6 +4210,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       drawingObjectIdRef.current = null;
       drawingPreviewPointRef.current = null;
       updatePreview();
+      useStore.getState().setDrawMode(null);
     };
 
     window.addEventListener('csg-finish-drawing-stroke', handleCustomFinish);
@@ -4497,6 +4568,58 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       if (event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom) return;
       const mx=event.clientX-rect.left, my=event.clientY-rect.top;
 
+      // ── Lathe Virtual Axis Drag ──
+      const curLathe = useStore.getState().latheConfig;
+      if (curLathe && curLathe.active && cameraRef.current && rendererRef.current && event.button === 0) {
+        const cam = cameraRef.current;
+        const w = rendererRef.current.domElement.clientWidth;
+        const h = rendererRef.current.domElement.clientHeight;
+        const axisPos = curLathe.axisPos || 0;
+        let pTop3D = new THREE.Vector3();
+        let pBot3D = new THREE.Vector3();
+
+        if (curLathe.axis === 'y') {
+          pTop3D.set(axisPos, 50, 0);
+          pBot3D.set(axisPos, -50, 0);
+        } else if (curLathe.axis === 'x') {
+          pTop3D.set(-50, axisPos, 0);
+          pBot3D.set(50, axisPos, 0);
+        } else {
+          pTop3D.set(axisPos, 0, 50);
+          pBot3D.set(axisPos, 0, -50);
+        }
+
+        const ndcTop = pTop3D.clone().project(cam);
+        const ndcBot = pBot3D.clone().project(cam);
+
+        if (ndcTop.z <= 1.2 && ndcBot.z <= 1.2) {
+          const sTopX = (ndcTop.x * 0.5 + 0.5) * w;
+          const sTopY = (ndcTop.y * -0.5 + 0.5) * h;
+          const sBotX = (ndcBot.x * 0.5 + 0.5) * w;
+          const sBotY = (ndcBot.y * -0.5 + 0.5) * h;
+
+          const ldx = sBotX - sTopX;
+          const ldy = sBotY - sTopY;
+          const lSq = ldx * ldx + ldy * ldy;
+          let distToAxis = Infinity;
+          if (lSq > 0) {
+            let t = ((mx - sTopX) * ldx + (my - sTopY) * ldy) / lSq;
+            t = Math.max(0, Math.min(1, t));
+            const px = sTopX + t * ldx;
+            const py = sTopY + t * ldy;
+            distToAxis = Math.hypot(mx - px, my - py);
+          }
+
+          if (distToAxis <= 22) {
+            isDraggingLatheAxisRef.current = true;
+            if (controlsRef.current) controlsRef.current.enabled = false;
+            event.stopPropagation();
+            event.preventDefault();
+            return;
+          }
+        }
+      }
+
       // Store start position for drag detection
       gizmoStateRef.current.startScreenPos = { x: event.clientX, y: event.clientY };
 
@@ -4810,82 +4933,123 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         const selObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
         const isShape = selObj?.type === 'SHAPE';
         
-        if (isShape && primitivesGroupRef.current) {
-          const sphereHits = raycasterRef.current.intersectObjects(primitivesGroupRef.current.children, false);
-          const sh = sphereHits.find(h => h.object.userData.handleType !== undefined);
-          
-          if (sh) {
+        if (isShape && selObj && selObj.vertices) {
+          const rect = rendererRef.current!.domElement.getBoundingClientRect();
+          const clickScreenX = event.clientX - rect.left;
+          const clickScreenY = event.clientY - rect.top;
+          const _interp = getInterpolatedTransform(selObj, currentTime);
+          const mat4 = new THREE.Matrix4().compose(
+            new THREE.Vector3().fromArray(_interp.position),
+            new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+            new THREE.Vector3().fromArray(_interp.scale)
+          );
+
+          let bestHit: { type: 'anchor' | 'bezierOut' | 'bezierIn'; anchorIdx: number; dist: number; worldPos: THREE.Vector3 } | null = null;
+          const isBezier = selObj.parameters?.shapeType === 'bezier' || !!selObj.bezierHandles;
+
+          // 1. Proximity hit check in screen space for anchors and handles (within 24px)
+          selObj.vertices.forEach((v, i) => {
+            const off = selObj.vertexOffsets?.[i] ?? [0, 0, 0];
+            const worldPt = new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
+            const p_ndc = worldPt.clone().project(cameraRef.current!);
+            if (p_ndc.z <= 1) {
+              const sx = (p_ndc.x * 0.5 + 0.5) * rect.width;
+              const sy = (-p_ndc.y * 0.5 + 0.5) * rect.height;
+              const dist = Math.hypot(clickScreenX - sx, clickScreenY - sy);
+              if (dist <= 24 && (!bestHit || dist < bestHit.dist)) {
+                bestHit = { type: 'anchor', anchorIdx: i, dist, worldPos: worldPt };
+              }
+            }
+
+            // Check bezier handles if present
+            if (isBezier && selObj.bezierHandles?.[i]) {
+              const h = selObj.bezierHandles[i];
+              // OUT handle
+              const outWorld = new THREE.Vector3(v[0] + off[0] + h.out[0], v[1] + off[1] + h.out[1], v[2] + off[2] + h.out[2]).applyMatrix4(mat4);
+              const out_ndc = outWorld.clone().project(cameraRef.current!);
+              if (out_ndc.z <= 1) {
+                const sx = (out_ndc.x * 0.5 + 0.5) * rect.width;
+                const sy = (-out_ndc.y * 0.5 + 0.5) * rect.height;
+                const dist = Math.hypot(clickScreenX - sx, clickScreenY - sy);
+                if (dist <= 22 && (!bestHit || dist < bestHit.dist)) {
+                  bestHit = { type: 'bezierOut', anchorIdx: i, dist, worldPos: outWorld };
+                }
+              }
+              // IN handle
+              const inWorld = new THREE.Vector3(v[0] + off[0] + h.in[0], v[1] + off[1] + h.in[1], v[2] + off[2] + h.in[2]).applyMatrix4(mat4);
+              const in_ndc = inWorld.clone().project(cameraRef.current!);
+              if (in_ndc.z <= 1) {
+                const sx = (in_ndc.x * 0.5 + 0.5) * rect.width;
+                const sy = (-in_ndc.y * 0.5 + 0.5) * rect.height;
+                const dist = Math.hypot(clickScreenX - sx, clickScreenY - sy);
+                if (dist <= 22 && (!bestHit || dist < bestHit.dist)) {
+                  bestHit = { type: 'bezierIn', anchorIdx: i, dist, worldPos: inWorld };
+                }
+              }
+            }
+          });
+
+          if (bestHit) {
             event.stopPropagation();
             event.preventDefault();
             hitSomething = true;
-            const ht = sh.object.userData.handleType as string;
-            const ai = sh.object.userData.anchorIdx as number;
-            
-            // Start drag immediately for vertices/handles
-            gizmoStateRef.current.dragHandleType = ht as any;
+            const ht = bestHit.type;
+            const ai = bestHit.anchorIdx;
+
+            gizmoStateRef.current.dragHandleType = ht;
             gizmoStateRef.current.dragAnchorIdx = ai;
             gizmoStateRef.current.activeAxis = 'FREE';
             gizmoStateRef.current.startScreenPos = { x: event.clientX, y: event.clientY };
-            gizmoStateRef.current.startWorldGizmoPos = sh.point.clone();
+            gizmoStateRef.current.startWorldGizmoPos = bestHit.worldPos.clone();
             isDraggingRef.current = true;
 
-            if (selObj) {
-              const offsets: Record<number,[number,number,number]> = {};
-              if (ht === 'bezierOut' || ht === 'bezierIn') {
-                const h = selObj.bezierHandles?.[ai];
-                if (h) {
-                  const hKey = ht === 'bezierOut' ? ai + 10000 : ai + 20000;
-                  offsets[hKey] = ht === 'bezierOut' ? [...h.out] as [number,number,number] : [...h.in] as [number,number,number];
-                }
-              } else {
-                const selectedIdxs = (!event.shiftKey && !selectedVertexIndices.includes(ai)) ? [ai] : selectedVertexIndices.includes(ai) ? selectedVertexIndices : [...selectedVertexIndices, ai];
-                selectedIdxs.forEach(idx => {
-                  if (idx < 10000) offsets[idx] = [...(selObj.vertexOffsets?.[idx] ?? [0,0,0])] as [number,number,number];
-                });
+            const offsets: Record<number, [number, number, number]> = {};
+            if (ht === 'bezierOut' || ht === 'bezierIn') {
+              const h = selObj.bezierHandles?.[ai];
+              if (h) {
+                const hKey = ht === 'bezierOut' ? ai + 10000 : ai + 20000;
+                offsets[hKey] = ht === 'bezierOut' ? [...h.out] as [number, number, number] : [...h.in] as [number, number, number];
               }
-              gizmoStateRef.current.startVertexOffsets = offsets;
-            }
-            
-            if (ht === 'anchor') {
+              setSelectedVertexIndices([ht === 'bezierOut' ? ai + 10000 : ai + 20000]);
+            } else {
+              const selectedIdxs = (!event.shiftKey && !selectedVertexIndices.includes(ai)) ? [ai] : selectedVertexIndices.includes(ai) ? selectedVertexIndices : [...selectedVertexIndices, ai];
+              selectedIdxs.forEach(idx => {
+                if (idx < 10000) offsets[idx] = [...(selObj.vertexOffsets?.[idx] ?? [0, 0, 0])] as [number, number, number];
+              });
               if (!event.shiftKey && !selectedVertexIndices.includes(ai)) {
                 setSelectedVertexIndices([ai]);
               } else if (event.shiftKey) {
                 addSelectedVertexIndices([ai]);
               }
-            } else if (ht === 'bezierOut') {
-              setSelectedVertexIndices([ai + 10000]);
-            } else if (ht === 'bezierIn') {
-              setSelectedVertexIndices([ai + 20000]);
             }
-
+            gizmoStateRef.current.startVertexOffsets = offsets;
             if (controlsRef.current) controlsRef.current.enabled = false;
-          } else {
-            // Click on the curve line → insert a new control point
-            const lineHits = raycasterRef.current.intersectObjects(primitivesGroupRef.current.children, false);
+            return;
+          } else if (insertVertexMode) {
+            // ONLY insert vertex if insertVertexMode was explicitly activated
+            const lineHits = raycasterRef.current.intersectObjects(primitivesGroupRef.current?.children || [], false);
             const lh = lineHits.find(h => h.object.userData.handleType === 'curveLine');
-            const shapeObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
-            if (lh && shapeObj) {
+            if (lh) {
               event.stopPropagation();
               event.preventDefault();
               hitSomething = true;
               const clickPt = lh.point.clone();
-              const _interp = getInterpolatedTransform(shapeObj, currentTime);
               const mat = new THREE.Matrix4().compose(
                 new THREE.Vector3().fromArray(_interp.position),
                 new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
                 new THREE.Vector3().fromArray(_interp.scale)
               );
               const localPt = clickPt.clone().applyMatrix4(mat.invert());
-              const verts = shapeObj.vertices;
-              const offsets = shapeObj.vertexOffsets ?? {};
+              const verts = selObj.vertices;
+              const offsets = selObj.vertexOffsets ?? {};
               let bestIdx = verts.length;
               
               if (lh.index !== undefined) {
-                const segCount = shapeObj.parameters.segments ?? 20;
+                const segCount = selObj.parameters?.segments ?? 20;
                 bestIdx = Math.floor(lh.index / segCount) + 1;
               } else {
                 let bestDist = Infinity;
-                const loopCount = shapeObj.parameters.closed ? verts.length : verts.length - 1;
+                const loopCount = selObj.parameters?.closed ? verts.length : verts.length - 1;
                 for (let k = 0; k < loopCount; k++) {
                   const k1 = (k + 1) % verts.length;
                   const offA = offsets[k] ?? [0,0,0];
@@ -4901,10 +5065,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               }
               const newVerts = [...verts];
               newVerts.splice(bestIdx, 0, [localPt.x, localPt.y, localPt.z] as [number,number,number]);
-              const newHandles = shapeObj.bezierHandles ? [...shapeObj.bezierHandles] : [];
+              const newHandles = selObj.bezierHandles ? [...selObj.bezierHandles] : [];
               if (newHandles.length > 0) newHandles.splice(bestIdx, 0, { out: [0,0,0], in: [0,0,0], broken: false });
               const newOffsets: Record<number,[number,number,number]> = {};
-              Object.entries(shapeObj.vertexOffsets ?? {}).forEach(([k,v]) => {
+              Object.entries(selObj.vertexOffsets ?? {}).forEach(([k,v]) => {
                 const ki = parseInt(k);
                 if (ki >= bestIdx) newOffsets[ki+1] = v as [number,number,number];
                 else newOffsets[ki] = v as [number,number,number];
@@ -4917,6 +5081,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               setSelectedVertexIndices([bestIdx]);
               saveHistory();
               if (controlsRef.current) controlsRef.current.enabled = false;
+              return;
             }
           }
         } else if (selObj && (vertexPointsRef.current || groupRef.current)) {
@@ -5165,10 +5330,81 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         return;
       }
 
+      // ── Lathe Virtual Axis Active Dragging ──
+      if (isDraggingLatheAxisRef.current) {
+        const curLathe = useStore.getState().latheConfig;
+        const pt = getPoint(event, true);
+        if (pt && curLathe) {
+          let newPos = (curLathe.axis === 'y' || curLathe.axis === 'z') ? pt.x : pt.y;
+          if (gridSnapEnabled) {
+            const step = useStore.getState().viewportConfig?.snapStep || 0.5;
+            newPos = Math.round(newPos / step) * step;
+          }
+          newPos = safeParseFixed(newPos, 3, 0);
+          useStore.getState().updateLatheAxisPos(newPos);
+        }
+        if (rendererRef.current) rendererRef.current.domElement.style.cursor = 'col-resize';
+        event.stopPropagation();
+        event.preventDefault();
+        return;
+      }
+
       const gs=gizmoStateRef.current, camera=cameraRef.current;
       if (!camera) return;
       if (!gs.activeAxis && rendererRef.current) {
         const rect=rendererRef.current.domElement.getBoundingClientRect();
+
+        // ── Lathe Axis Hover Check ──
+        const curLathe = useStore.getState().latheConfig;
+        if (curLathe && curLathe.active && cameraRef.current && rendererRef.current) {
+          const cam = cameraRef.current;
+          const w = rendererRef.current.domElement.clientWidth;
+          const h = rendererRef.current.domElement.clientHeight;
+          const axisPos = curLathe.axisPos || 0;
+          let pTop3D = new THREE.Vector3();
+          let pBot3D = new THREE.Vector3();
+
+          if (curLathe.axis === 'y') {
+            pTop3D.set(axisPos, 50, 0);
+            pBot3D.set(axisPos, -50, 0);
+          } else if (curLathe.axis === 'x') {
+            pTop3D.set(-50, axisPos, 0);
+            pBot3D.set(50, axisPos, 0);
+          } else {
+            pTop3D.set(axisPos, 0, 50);
+            pBot3D.set(axisPos, 0, -50);
+          }
+
+          const ndcTop = pTop3D.clone().project(cam);
+          const ndcBot = pBot3D.clone().project(cam);
+
+          if (ndcTop.z <= 1.2 && ndcBot.z <= 1.2) {
+            const sTopX = (ndcTop.x * 0.5 + 0.5) * w;
+            const sTopY = (ndcTop.y * -0.5 + 0.5) * h;
+            const sBotX = (ndcBot.x * 0.5 + 0.5) * w;
+            const sBotY = (ndcBot.y * -0.5 + 0.5) * h;
+
+            const ldx = sBotX - sTopX;
+            const ldy = sBotY - sTopY;
+            const lSq = ldx * ldx + ldy * ldy;
+            const mx = event.clientX - rect.left;
+            const my = event.clientY - rect.top;
+            let distToAxis = Infinity;
+            if (lSq > 0) {
+              let t = ((mx - sTopX) * ldx + (my - sTopY) * ldy) / lSq;
+              t = Math.max(0, Math.min(1, t));
+              const px = sTopX + t * ldx;
+              const py = sTopY + t * ldy;
+              distToAxis = Math.hypot(mx - px, my - py);
+            }
+
+            if (distToAxis <= 18) {
+              rendererRef.current.domElement.style.cursor = 'col-resize';
+              return;
+            }
+          }
+        }
+
         gs.hoveredAxis=getAxisHit(event.clientX-rect.left, event.clientY-rect.top);
         if (gs.hoveredAxis) {
           rendererRef.current.domElement.style.cursor = 'grab';
@@ -5184,20 +5420,71 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
           if (editMode === 'EDGE') {
             let hitEdge = false;
-            if (primitivesGroupRef.current && hoverGroup) {
-              const hits = raycasterRef.current.intersectObjects(primitivesGroupRef.current.children, true);
-              if (hits.length && hits[0].face) {
-                const intersect = hits[0];
-                const mesh = intersect.object as THREE.Mesh;
-                const clickedId = mesh.userData.id;
-                const selObj = projectRef.current.objects.find(o => o.id === clickedId);
-                if (selObj && selObj.vertices && selObj.vertices.length > 0) {
-                  const pt = intersect.point;
-                  const validEdges = extractUniqueEdges(selObj);
-                  let bestEdge: [number, number] | null = null;
-                  let bestDist = Infinity;
-                  const pStart = new THREE.Vector3();
-                  const pEnd = new THREE.Vector3();
+            if (hoverGroup && (selectedObjectId || primitivesGroupRef.current)) {
+              const mouseScreenX = event.clientX - rect.left;
+              const mouseScreenY = event.clientY - rect.top;
+
+              // 1. Raycast against mesh faces first
+              let bestEdge: [number, number] | null = null;
+              let bestPStart = new THREE.Vector3();
+              let bestPEnd = new THREE.Vector3();
+              let bestEdgeDist = 28;
+
+              if (primitivesGroupRef.current) {
+                const hits = raycasterRef.current.intersectObjects(primitivesGroupRef.current.children, true);
+                if (hits.length && hits[0].face) {
+                  const intersect = hits[0];
+                  const mesh = intersect.object as THREE.Mesh;
+                  const clickedId = mesh.userData.id;
+                  const selObj = projectRef.current.objects.find(o => o.id === (clickedId || selectedObjectId));
+                  if (selObj && selObj.vertices && selObj.vertices.length > 0) {
+                    const pt = intersect.point;
+                    const validEdges = extractUniqueEdges(selObj, { dissolveCoplanars: false });
+                    for (const [v1, v2] of validEdges) {
+                      const vert1 = selObj.vertices[v1];
+                      const vert2 = selObj.vertices[v2];
+                      if (!vert1 || !vert2) continue;
+                      const off1 = selObj.vertexOffsets?.[v1] || [0, 0, 0];
+                      const off2 = selObj.vertexOffsets?.[v2] || [0, 0, 0];
+                      const pa = new THREE.Vector3(vert1[0] + off1[0], vert1[1] + off1[1], vert1[2] + off1[2]).applyMatrix4(mesh.matrixWorld);
+                      const pb = new THREE.Vector3(vert2[0] + off2[0], vert2[1] + off2[1], vert2[2] + off2[2]).applyMatrix4(mesh.matrixWorld);
+                      const dist = new THREE.Line3(pa, pb).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+                      if (dist < 0.25) {
+                        bestEdge = [v1, v2];
+                        bestPStart.copy(pa);
+                        bestPEnd.copy(pb);
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+
+              // 2. Screen-space proximity fallback for lines, shapes and wireframes
+              if (!bestEdge) {
+                const candidateObjs = selectedObjectId
+                  ? [projectRef.current.objects.find(o => o.id === selectedObjectId)].filter(Boolean) as CSGObject[]
+                  : projectRef.current.objects.filter(o => o.visible && o.vertices && o.vertices.length >= 2);
+
+                for (const selObj of candidateObjs) {
+                  const mesh = meshesRef.current.get(selObj.id) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selObj.id);
+                  const mat4 = mesh ? mesh.matrixWorld : (() => {
+                    const _interp = getInterpolatedTransform(selObj, currentTime);
+                    return new THREE.Matrix4().compose(
+                      new THREE.Vector3().fromArray(_interp.position),
+                      new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+                      new THREE.Vector3().fromArray(_interp.scale)
+                    );
+                  })();
+
+                  const validEdges: Array<[number, number]> = selObj.type === 'SHAPE'
+                    ? (() => {
+                        const edges: Array<[number, number]> = [];
+                        const count = selObj.parameters?.closed ? selObj.vertices.length : selObj.vertices.length - 1;
+                        for (let i = 0; i < count; i++) edges.push([i, (i + 1) % selObj.vertices.length]);
+                        return edges;
+                      })()
+                    : extractUniqueEdges(selObj, { dissolveCoplanars: false });
 
                   for (const [v1, v2] of validEdges) {
                     const vert1 = selObj.vertices[v1];
@@ -5205,61 +5492,82 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                     if (!vert1 || !vert2) continue;
                     const off1 = selObj.vertexOffsets?.[v1] || [0, 0, 0];
                     const off2 = selObj.vertexOffsets?.[v2] || [0, 0, 0];
-                    const pa = new THREE.Vector3(vert1[0] + off1[0], vert1[1] + off1[1], vert1[2] + off1[2]).applyMatrix4(mesh.matrixWorld);
-                    const pb = new THREE.Vector3(vert2[0] + off2[0], vert2[1] + off2[1], vert2[2] + off2[2]).applyMatrix4(mesh.matrixWorld);
-                    const dist = new THREE.Line3(pa, pb).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
-                    if (dist < bestDist) {
-                      bestDist = dist;
+                    const pa = new THREE.Vector3(vert1[0] + off1[0], vert1[1] + off1[1], vert1[2] + off1[2]).applyMatrix4(mat4);
+                    const pb = new THREE.Vector3(vert2[0] + off2[0], vert2[1] + off2[1], vert2[2] + off2[2]).applyMatrix4(mat4);
+
+                    const pA_ndc = pa.clone().project(camera);
+                    const pB_ndc = pb.clone().project(camera);
+                    if (pA_ndc.z > 1 && pB_ndc.z > 1) continue;
+
+                    const sAx = (pA_ndc.x * 0.5 + 0.5) * rect.width;
+                    const sAy = (pA_ndc.y * -0.5 + 0.5) * rect.height;
+                    const sBx = (pB_ndc.x * 0.5 + 0.5) * rect.width;
+                    const sBy = (pB_ndc.y * -0.5 + 0.5) * rect.height;
+
+                    const dx = sBx - sAx;
+                    const dy = sBy - sAy;
+                    const lenSq = dx * dx + dy * dy;
+                    if (lenSq === 0) continue;
+
+                    let t = ((mouseScreenX - sAx) * dx + (mouseScreenY - sAy) * dy) / lenSq;
+                    t = Math.max(0, Math.min(1, t));
+
+                    const projX = sAx + t * dx;
+                    const projY = sAy + t * dy;
+                    const dist = Math.hypot(mouseScreenX - projX, mouseScreenY - projY);
+
+                    if (dist < bestEdgeDist) {
+                      bestEdgeDist = dist;
                       bestEdge = [v1, v2];
-                      pStart.copy(pa);
-                      pEnd.copy(pb);
+                      bestPStart.copy(pa);
+                      bestPEnd.copy(pb);
                     }
-                  }
-
-                  if (bestEdge) {
-                    const logVA = bestEdge[0];
-                    const logVB = bestEdge[1];
-
-                    let isSel = false;
-                    for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
-                      const e1 = selectedEdgeIndices[i], e2 = selectedEdgeIndices[i + 1];
-                      if ((e1 === logVA && e2 === logVB) || (e1 === logVB && e2 === logVA)) {
-                        isSel = true;
-                        break;
-                      }
-                    }
-
-                    const eGeo = new THREE.BufferGeometry().setFromPoints([pStart, pEnd]);
-                    const hoverColor = isSel ? 0xef4444 : 0xfacc15;
-                    const edgeLine = new THREE.Line(
-                      eGeo,
-                      new THREE.LineBasicMaterial({
-                        color: hoverColor,
-                        linewidth: 5,
-                        depthTest: false,
-                        transparent: true,
-                        opacity: 0.95
-                      })
-                    );
-                    edgeLine.renderOrder = 60;
-                    hoverGroup.add(edgeLine);
-
-                    [pStart, pEnd].forEach(p => {
-                      const dot = new THREE.Mesh(
-                        SHARED_VERTEX_GEO,
-                        isSel ? SHARED_ACTIVE_MAT : SHARED_SELECTED_MAT
-                      );
-                      const edgeDotScale = getAdaptiveHandleScale(p, camera, rect.height, isSel ? 5.5 : 4.5, 0.0006, 0.025);
-                      dot.scale.setScalar(edgeDotScale);
-                      dot.position.copy(p);
-                      dot.renderOrder = 65;
-                      hoverGroup.add(dot);
-                    });
-
-                    rendererRef.current.domElement.style.cursor = isSel ? 'grab' : 'pointer';
-                    hitEdge = true;
                   }
                 }
+              }
+
+              if (bestEdge) {
+                const logVA = bestEdge[0];
+                const logVB = bestEdge[1];
+
+                let isSel = false;
+                for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
+                  const e1 = selectedEdgeIndices[i], e2 = selectedEdgeIndices[i + 1];
+                  if ((e1 === logVA && e2 === logVB) || (e1 === logVB && e2 === logVA)) {
+                    isSel = true;
+                    break;
+                  }
+                }
+
+                const eGeo = new THREE.BufferGeometry().setFromPoints([bestPStart, bestPEnd]);
+                const hoverColor = isSel ? 0xef4444 : 0xfacc15;
+                const edgeLine = new THREE.Line(
+                  eGeo,
+                  new THREE.LineBasicMaterial({
+                    color: hoverColor,
+                    linewidth: 5,
+                    depthTest: false,
+                    transparent: true,
+                    opacity: 0.95
+                  })
+                );
+                edgeLine.renderOrder = 60;
+                hoverGroup.add(edgeLine);
+
+                [bestPStart, bestPEnd].forEach(p => {
+                  const dot = new THREE.Mesh(
+                    SHARED_VERTEX_GEO,
+                    isSel ? SHARED_ACTIVE_MAT : SHARED_SELECTED_MAT
+                  );
+                  const edgeDotScale = getAdaptiveHandleScale(p, camera, rect.height, isSel ? 5.5 : 4.5, 0.0006, 0.025);
+                  dot.scale.setScalar(edgeDotScale);
+                  dot.position.copy(p);
+                  dot.renderOrder = 65;
+                  hoverGroup.add(dot);
+                });
+
+                rendererRef.current.domElement.style.cursor = isSel ? 'grab' : 'pointer';
+                hitEdge = true;
               }
             }
             if (!hitEdge) {
@@ -5447,7 +5755,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               // Hovering over an existing vertex allows moving (grab) or selecting for deletion
               rendererRef.current.domElement.style.cursor = isHoveredSelected ? 'grab' : 'pointer';
             } else if (selectedObjectId && hoverGroup) {
-              // Hovering over a border/edge: allows creating new vertices!
+              // Hovering over a border/edge in VERTEX mode: allows creating new vertices!
               const selObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
               if (selObj && selObj.vertices && selObj.vertices.length >= 2) {
                 const meshObj = primitivesGroupRef.current?.children.find(c => (c as any).userData?.id === selectedObjectId) as THREE.Mesh | undefined;
@@ -5471,7 +5779,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                     })()
                   : extractUniqueEdges(selObj, { dissolveCoplanars: false });
 
-                let bestEdgeDist = 24; // 24px screen distance threshold anywhere along the edge
+                let bestEdgeDist = 28; // 28px screen distance threshold anywhere along the edge
                 let bestEdge: [number, number] | null = null;
                 let bestWorldPt: THREE.Vector3 | null = null;
                 const mouseScreenX = event.clientX - rect.left;
@@ -5497,7 +5805,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
                   const distToA = Math.hypot(mouseScreenX - sAx, mouseScreenY - sAy);
                   const distToB = Math.hypot(mouseScreenX - sBx, mouseScreenY - sBy);
-                  if (distToA <= 16 || distToB <= 16) continue; // Skip edge creation if hovering near endpoints
+                  if (distToA <= 8 || distToB <= 8) continue; // Skip if directly on endpoint
 
                   const dx = sBx - sAx;
                   const dy = sBy - sAy;
@@ -5505,7 +5813,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                   if (lenSq === 0) continue;
 
                   let t = ((mouseScreenX - sAx) * dx + (mouseScreenY - sAy) * dy) / lenSq;
-                  if (t < 0.04 || t > 0.96) continue; // Keep clear margin from endpoints
+                  if (t < 0.02 || t > 0.98) continue;
 
                   const projX = sAx + t * dx;
                   const projY = sAy + t * dy;
@@ -6306,10 +6614,22 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               const hCur = curSelObj.bezierHandles?.[cai];
               if (hCur && anchor) {
                 const side = cht === 'bezierOut' ? 'out' : 'in';
-                const startRel = gs.startVertexOffsets[cht === 'bezierOut' ? cai+10000 : cai+20000] ?? [0,0,0];
+                const startRel = gs.startVertexOffsets[cht === 'bezierOut' ? cai+10000 : cai+20000] ?? (side === 'out' ? hCur.out : hCur.in);
                 const newRel: V3 = [startRel[0] + moveLocal.x, startRel[1] + moveLocal.y, startRel[2] + moveLocal.z];
-                const breakIt = event.altKey;
+                const breakIt = event.altKey || !!hCur.broken;
                 useStore.getState().updateBezierHandle(selectedObjectId, cai, side, newRel, breakIt);
+              }
+            } else if (curSelObj?.type === 'SHAPE' && selectedVertexIndices.some(i => i >= 10000)) {
+              // Gizmo translation on selected bezier handle
+              const idx = selectedVertexIndices[0];
+              const anchorIdx = idx >= 20000 ? idx - 20000 : idx - 10000;
+              const side = idx >= 20000 ? 'in' : 'out';
+              const hCur = curSelObj.bezierHandles?.[anchorIdx];
+              if (hCur) {
+                const startRel = gs.startVertexOffsets[idx] ?? (side === 'out' ? hCur.out : hCur.in);
+                const newRel: V3 = [startRel[0] + moveLocal.x, startRel[1] + moveLocal.y, startRel[2] + moveLocal.z];
+                const breakIt = event.altKey || !!hCur.broken;
+                useStore.getState().updateBezierHandle(selectedObjectId, anchorIdx, side, newRel, breakIt);
               }
             } else {
               // Apply face snapping if active
@@ -6585,6 +6905,20 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           );
           controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
         }
+        return;
+      }
+
+      // ── Lathe Virtual Axis drag end ───────────────────────────────────────
+      if (isDraggingLatheAxisRef.current) {
+        isDraggingLatheAxisRef.current = false;
+        saveHistory();
+        if (controlsRef.current) {
+          const isSiluetaActiveInThisViewport = !!(silueta.activePlane && 
+            silueta.activePlane.toUpperCase() === type.toUpperCase()
+          );
+          controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
+        }
+        event.stopPropagation();
         return;
       }
 
@@ -7064,6 +7398,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         );
         controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
       }
+      if (isDraggingLatheAxisRef.current) {
+        isDraggingLatheAxisRef.current = false;
+        saveHistory('Ajustar eje de revolución');
+      }
       if (isDraggingRef.current) {
         saveHistory();
         isDraggingRef.current = false;
@@ -7073,6 +7411,38 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     const handleKeyDown = (event: KeyboardEvent) => {
       const tag = (event.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+      // ── Escape to cancel/exit drawing, insert vertex mode or clear selection ──
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (drawMode) {
+          useStore.getState().setDrawMode(null);
+          drawingPointsRef.current = [];
+          drawingHandlesRef.current = [];
+          if (updatePreviewRef.current) updatePreviewRef.current();
+          return;
+        }
+        if (insertVertexMode) {
+          useStore.getState().toggleInsertVertexMode(false);
+          return;
+        }
+        if (selectedVertexIndices.length > 0) {
+          setSelectedVertexIndices([]);
+          return;
+        }
+        if (selectedObjectId) {
+          clearSelection();
+          return;
+        }
+        return;
+      }
+
+      // ── Enter to finish stroke while drawing ──
+      if (event.key === 'Enter' && drawMode) {
+        event.preventDefault();
+        finishStrokeRef.current?.(null);
+        return;
+      }
 
       // ── Global Undo / Redo in Viewport ───────────────────────────────
       if (event.ctrlKey || event.metaKey) {
@@ -7443,6 +7813,85 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         ctx.restore();
       }
 
+      // ── Draw Lathe Virtual Rotation Axis Line & Interactive Handle ──
+      const curLathe = useStore.getState().latheConfig;
+      if (curLathe && curLathe.active && cameraRef.current && renderer) {
+        const cam = cameraRef.current;
+        const axisPos = curLathe.axisPos || 0;
+        let pTop3D = new THREE.Vector3();
+        let pBot3D = new THREE.Vector3();
+
+        if (curLathe.axis === 'y') {
+          pTop3D.set(axisPos, 50, 0);
+          pBot3D.set(axisPos, -50, 0);
+        } else if (curLathe.axis === 'x') {
+          pTop3D.set(-50, axisPos, 0);
+          pBot3D.set(50, axisPos, 0);
+        } else {
+          pTop3D.set(axisPos, 0, 50);
+          pBot3D.set(axisPos, 0, -50);
+        }
+
+        const ndcTop = pTop3D.clone().project(cam);
+        const ndcBot = pBot3D.clone().project(cam);
+
+        if (ndcTop.z <= 1.2 && ndcBot.z <= 1.2) {
+          const sTopX = (ndcTop.x * 0.5 + 0.5) * w;
+          const sTopY = (ndcTop.y * -0.5 + 0.5) * h;
+          const sBotX = (ndcBot.x * 0.5 + 0.5) * w;
+          const sBotY = (ndcBot.y * -0.5 + 0.5) * h;
+
+          ctx.save();
+
+          // Dark outer stroke
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+          ctx.lineWidth = 4.5;
+          ctx.beginPath();
+          ctx.moveTo(sTopX, sTopY);
+          ctx.lineTo(sBotX, sBotY);
+          ctx.stroke();
+
+          // Glowing dashed gold line
+          ctx.strokeStyle = '#f59e0b';
+          ctx.lineWidth = 2.2;
+          ctx.setLineDash([8, 6]);
+          ctx.beginPath();
+          ctx.moveTo(sTopX, sTopY);
+          ctx.lineTo(sBotX, sBotY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Central draggable handle badge
+          const hX = Math.max(90, Math.min(w - 90, (sTopX + sBotX) * 0.5));
+          const hY = Math.max(35, Math.min(h - 35, (sTopY + sBotY) * 0.5));
+
+          const badgeWidth = 156;
+          const badgeHeight = 26;
+          const bx = hX - badgeWidth / 2;
+          const by = hY - badgeHeight / 2;
+
+          ctx.shadowColor = 'rgba(245, 158, 11, 0.45)';
+          ctx.shadowBlur = 10;
+          ctx.fillStyle = '#18181b';
+          ctx.beginPath();
+          ctx.roundRect(bx, by, badgeWidth, badgeHeight, 13);
+          ctx.fill();
+
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = '#f59e0b';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          ctx.fillStyle = '#fef3c7';
+          ctx.font = 'bold 10px monospace, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`⟲ EJE (${curLathe.axis.toUpperCase()}:${axisPos.toFixed(2)}) ◀▶`, hX, hY);
+
+          ctx.restore();
+        }
+      }
+
       if (!selectedObjectId && !selectedLightId && !selectedCameraId) return;
 
       const selObj = selectedObjectId ? projectRef.current.objects.find(o=>o.id===selectedObjectId) : null;
@@ -7794,6 +8243,51 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         }}
         onToggleMaximize={() => setMaximizedViewport(maximizedViewport === type ? null : type)}
       />
+
+      {/* Floating Drawing Mode / Vertex Tool Action Banner */}
+      {drawMode && (
+        <div className="absolute top-10 sm:top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-zinc-900/95 border border-indigo-500/80 shadow-2xl rounded-full px-3.5 py-1.5 backdrop-blur-md text-white select-none pointer-events-auto max-w-[90%]">
+          <div className="flex items-center gap-1.5 font-bold text-xs shrink-0">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-zinc-300">Dibujando:</span>
+            <span className="text-indigo-300 font-semibold">
+              {drawMode === 'freehand' ? 'Mano Alzada (Lápiz)' : drawMode === 'smooth' ? 'Curva Suave' : drawMode === 'bezier' ? 'Curva Bézier' : drawMode === 'line' ? 'Polilínea' : 'Rectángulo'}
+            </span>
+          </div>
+          <div className="hidden md:block w-px h-3.5 bg-white/20 mx-0.5" />
+          <span className="text-[10px] text-zinc-400 hidden md:inline">Doble clic para terminar</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              useStore.getState().setDrawMode(null);
+            }}
+            className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 hover:bg-red-500/40 text-red-300 border border-red-500/40 flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+            title="Salir del modo dibujo y volver al modo selección (Esc)"
+          >
+            <X size={12} /> Salir (Esc)
+          </button>
+        </div>
+      )}
+
+      {insertVertexMode && (
+        <div className="absolute top-10 sm:top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-zinc-900/95 border border-cyan-500/80 shadow-2xl rounded-full px-3.5 py-1.5 backdrop-blur-md text-white select-none pointer-events-auto max-w-[90%]">
+          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0" />
+          <span className="text-xs font-bold text-cyan-300 shrink-0">+ Insertar Vértice:</span>
+          <span className="text-[10px] text-zinc-400 hidden sm:inline">Haz clic sobre una arista o curva</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              useStore.getState().toggleInsertVertexMode(false);
+            }}
+            className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-white/10 flex items-center gap-1 transition-colors cursor-pointer ml-1 shrink-0"
+            title="Desactivar modo insertar vértice (Esc)"
+          >
+            <X size={12} /> Desactivar (Esc)
+          </button>
+        </div>
+      )}
 
       {/* 2. Navigation and Alignment Toolbar */}
       <ViewportNavigationControls

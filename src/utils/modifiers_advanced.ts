@@ -473,6 +473,7 @@ export function revolveMesh(
   axis: 'x' | 'y' | 'z' = 'y',
   axisOffset: number = 0,
   closed: boolean = true,
+  axisPos: number = 0,
 ): { vertices: V3[]; faces: MeshFace[] } {
   if (profile.length < 2) return { vertices: [], faces: [] };
 
@@ -493,14 +494,14 @@ export function revolveMesh(
 
     for (let pi = 0; pi < n; pi++) {
       const [r, h] = profile[pi];
-      const radius = r + axisOffset;
+      const radius = r + (axisOffset > 0 ? axisOffset : 0);
       let v: V3;
       if (axis === 'y') {
-        v = [radius * cosT, h, radius * sinT];
+        v = [axisPos + radius * cosT, h, radius * sinT];
       } else if (axis === 'x') {
-        v = [h, radius * cosT, radius * sinT];
+        v = [h, axisPos + radius * cosT, radius * sinT];
       } else {
-        v = [radius * cosT, radius * sinT, h];
+        v = [axisPos + radius * cosT, radius * sinT, h];
       }
       verts.push(v);
     }
@@ -530,16 +531,6 @@ export function revolveMesh(
     faces.push({ indices: endRing });
   }
 
-  // Tapa superior e inferior del perfil (cierre axial)
-  if (profile[0][0] > 0.001 || profile[n-1][0] > 0.001) {
-    // La geometría es hueca — no añadir caps axiales automáticamente
-  } else {
-    // Añadir caps superior e inferior si el radio=0 en los extremos
-    if (Math.abs(profile[0][0]) < 0.001 && fullCircle) {
-      // Punto en el eje — ya está colapsado, no necesita cap
-    }
-  }
-
   return { vertices: verts, faces };
 }
 
@@ -547,14 +538,16 @@ export function revolveMesh(
 
 /**
  * Convierte un CSGObject de tipo SHAPE a un perfil [[r, h], ...] para revolveMesh.
- * Proyecta los vértices al plano XY asumiendo que la forma está en ese plano.
+ * Proyecta los vértices al plano correspondiente calculando la distancia al eje de rotación.
  *
  * @param obj       Objeto SHAPE con vertices en el plano
  * @param axis      Eje de revolución — determina qué coordenadas usar como r/h
+ * @param axisPos   Posición del eje virtual de rotación
  */
 export function shapeToProfile(
   obj: CSGObject,
   axis: 'x' | 'y' | 'z' = 'y',
+  axisPos: number = 0,
 ): [number, number][] {
   // Bake offsets first
   const baked: V3[] = obj.vertices.map((v, i) => {
@@ -562,21 +555,16 @@ export function shapeToProfile(
     return [v[0]+off[0], v[1]+off[1], v[2]+off[2]] as V3;
   });
 
-  // Map to [radius, height] based on revolution axis
-  // radius = distance from the axis (always positive)
-  // height = position along the axis
+  // Map to [radius from axisPos, height] based on revolution axis
   const pts: [number, number][] = baked.map(v => {
-    if (axis === 'y') return [v[0], v[1]];          // r=x, h=y
-    if (axis === 'x') return [v[2], v[0]];          // r=z, h=x
-    return [v[0], v[2]];                             // r=x, h=z (axis=z)
+    if (axis === 'y') return [v[0] - axisPos, v[1]];          // r = x - axisPos, h = y
+    if (axis === 'x') return [v[1] - axisPos, v[0]];          // r = y - axisPos, h = x
+    return [v[0] - axisPos, v[2]];                            // r = x - axisPos, h = z (axis=z)
   });
 
-  // Sort by height so the profile goes bottom→top
-  const sorted = [...pts].sort((a, b) => a[1] - b[1]);
-
-  // If all radii are negative, flip them (profile was drawn on the left of axis)
-  const allNeg = sorted.every(([r]) => r <= 0);
-  return sorted.map(([r, h]) => [allNeg ? -r : Math.abs(r), h] as [number, number]);
+  // If all radii are negative, flip them (profile was drawn on the left of the axis line)
+  const allNeg = pts.every(([r]) => r <= 0);
+  return pts.map(([r, h]) => [allNeg ? -r : Math.abs(r), h] as [number, number]);
 }
 
 // ─── 9. SIMPLIFICAR MALLA (Decimate) ──────────────────────────────────────────

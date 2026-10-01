@@ -475,6 +475,7 @@ export const Toolbar: React.FC = () => {
     viewportConfig, setViewportPreset, setViewportSplits,
     setCustomResizeMode, setSnapStep, resetViewportSplits,
     faceSnapConfig, setFaceSnapConfig, toggleFaceSnap,
+    insertVertexMode, setInsertVertexMode,
   } = useStore();
 
   const [showFaceSnapMenu, setShowFaceSnapMenu] = useState(false);
@@ -603,9 +604,11 @@ export const Toolbar: React.FC = () => {
   // Torno libre
   const [latPickedId, setLatPickedId] = useState<string|null>(null);
   const [latAxis,     setLatAxis]     = useState<'x'|'y'|'z'>('y');
+  const [latAxisPos,  setLatAxisPos]  = useState<number>(0);
   const [latAngle,    setLatAngle]    = useState(360);
   const [latSegs,     setLatSegs]     = useState(32);
   const [latOffset,   setLatOffset]   = useState(0);
+  const [latLivePreview, setLatLivePreview] = useState(true);
   // Sweep/Loft desde escena
   const [sweepPickProfile, setSweepPickProfile] = useState<string|null>(null);
   const [sweepPickPath,    setSweepPickPath]    = useState<string|null>(null);
@@ -1632,22 +1635,49 @@ export const Toolbar: React.FC = () => {
                     {/* ════ DIBUJAR ════ */}
                     {createTab==='dibujar'&&(
                       <>
-                        <PTitle icon="✏️" title="Herramientas de Dibujo" desc="Dibuja formas 2D en el plano."/>
-                        <div className="grid grid-cols-3 gap-2">
-                          <button onClick={()=>{setDrawMode(drawMode==='line'?null:'line');setShowMainCreate(false);}} 
-                            className={`flex flex-col items-center gap-2 p-3 rounded-lg border transition-all ${drawMode==='line'?'bg-indigo-600 border-indigo-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
-                            <Pencil size={20}/><span className="text-[10px] font-bold">Línea</span>
+                        <PTitle icon="✏️" title="Herramientas de Dibujo" desc="Dibuja curvas normales, trazo libre o curvas Bézier en el plano."/>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button onClick={()=>{setDrawMode(drawMode==='smooth'?null:'smooth');setShowMainCreate(false);}} 
+                            className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer ${drawMode==='smooth'?'bg-indigo-600 border-indigo-400 text-white shadow-md':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
+                            <Waves size={18} className={drawMode==='smooth'?'text-cyan-300':'text-cyan-400'}/>
+                            <div className="text-left">
+                              <span className="text-[10.5px] font-bold block">Curva Normal / Suave</span>
+                              <span className="text-[8.5px] text-zinc-400 block leading-tight">Curva continua suave sin manecillas complejas</span>
+                            </div>
                           </button>
-                          <button onClick={()=>{setDrawMode(drawMode==='rect'?null:'rect');setShowMainCreate(false);}} 
-                            className={`flex flex-col items-center gap-2 p-3 rounded-lg border transition-all ${drawMode==='rect'?'bg-indigo-600 border-indigo-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
-                            <SquareDashed size={20}/><span className="text-[10px] font-bold">Rectángulo</span>
+                          <button onClick={()=>{setDrawMode(drawMode==='freehand'?null:'freehand');setShowMainCreate(false);}} 
+                            className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer ${drawMode==='freehand'?'bg-indigo-600 border-indigo-400 text-white shadow-md':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
+                            <Flame size={18} className={drawMode==='freehand'?'text-amber-300':'text-amber-400'}/>
+                            <div className="text-left">
+                              <span className="text-[10.5px] font-bold block">Mano Alzada (Lápiz)</span>
+                              <span className="text-[8.5px] text-zinc-400 block leading-tight">Trazo libre continuo fluido con el ratón</span>
+                            </div>
                           </button>
                           <button onClick={()=>{setDrawMode(drawMode==='bezier'?null:'bezier');setShowMainCreate(false);}} 
-                            className={`flex flex-col items-center gap-2 p-3 rounded-lg border transition-all ${drawMode==='bezier'?'bg-indigo-600 border-indigo-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
-                            <Spline size={20}/><span className="text-[10px] font-bold">Curva Bézier</span>
+                            className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer ${drawMode==='bezier'?'bg-indigo-600 border-indigo-400 text-white shadow-md':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
+                            <Spline size={18} className={drawMode==='bezier'?'text-indigo-300':'text-indigo-400'}/>
+                            <div className="text-left">
+                              <span className="text-[10.5px] font-bold block">Curva Bézier</span>
+                              <span className="text-[8.5px] text-zinc-400 block leading-tight">Vectores de control y brazos ajustables</span>
+                            </div>
+                          </button>
+                          <button onClick={()=>{setDrawMode(drawMode==='line'?null:'line');setShowMainCreate(false);}} 
+                            className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer ${drawMode==='line'?'bg-indigo-600 border-indigo-400 text-white shadow-md':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
+                            <Pencil size={18} className={drawMode==='line'?'text-emerald-300':'text-emerald-400'}/>
+                            <div className="text-left">
+                              <span className="text-[10.5px] font-bold block">Línea / Polilínea</span>
+                              <span className="text-[8.5px] text-zinc-400 block leading-tight">Segmentos rectos conectados</span>
+                            </div>
                           </button>
                         </div>
-                        <div className="mt-4 p-3 bg-zinc-800/30 rounded-lg border border-zinc-800">
+                        <div className="mt-2">
+                          <button onClick={()=>{setDrawMode(drawMode==='rect'?null:'rect');setShowMainCreate(false);}} 
+                            className={`w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border transition-all cursor-pointer ${drawMode==='rect'?'bg-indigo-600 border-indigo-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
+                            <SquareDashed size={16}/>
+                            <span className="text-[10.5px] font-bold">Rectángulo 2D</span>
+                          </button>
+                        </div>
+                        <div className="mt-3 p-2.5 bg-zinc-800/30 rounded-lg border border-zinc-800">
                           <div className="flex items-center justify-between">
                             <span className="text-[10px] font-bold text-zinc-400">Color de trazo</span>
                             <div className="flex items-center gap-2">
@@ -1718,11 +1748,13 @@ export const Toolbar: React.FC = () => {
                       <LatheFromShapeTab
                         latPickedId={latPickedId} setLatPickedId={setLatPickedId}
                         latAxis={latAxis} setLatAxis={setLatAxis}
+                        latAxisPos={latAxisPos} setLatAxisPos={setLatAxisPos}
                         latAngle={latAngle} setLatAngle={setLatAngle}
                         latSegs={latSegs}   setLatSegs={setLatSegs}
                         latOffset={latOffset} setLatOffset={setLatOffset}
+                        latLivePreview={latLivePreview} setLatLivePreview={setLatLivePreview}
                         project={project}
-                        onGenerate={(v,f,n)=>{addGen(v,f,n,'lathe',{genAxis:latAxis,genAngle:latAngle,genSegs:latSegs});}}
+                        onGenerate={(v,f,n)=>{addGen(v,f,n,'lathe',{genAxis:latAxis,genAngle:latAngle,genSegs:latSegs,genAxisPos:latAxisPos,genAxisOffset:latOffset,genSourceShapeId:latPickedId});}}
                       />
                     )}
 
@@ -2125,218 +2157,92 @@ export const Toolbar: React.FC = () => {
 
           <Sep/>
 
-          {/* ── Quick Tools (Gap) ── */}
-          {!isFloating && (showMainEdit || editMode !== 'OBJECT' || showMainCreate) && (
+          {/* ── Quick Edit / Vertex Tools Strip ── */}
+          {!isFloating && (editMode !== 'OBJECT' || (selectedObjectId && project.objects.find(o => o.id === selectedObjectId)?.type === 'SHAPE')) && (
             <div className="flex items-center gap-1 px-1 min-w-0 overflow-hidden flex-shrink">
               <AnimatePresence mode="wait">
-                {showMainEdit || editMode !== 'OBJECT' ? (
-                  <motion.div 
-                    key="edit-quick"
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 10 }}
-                    className="flex items-center gap-1 bg-zinc-900/50 p-1 rounded-lg border border-white/5"
-                  >
-                    <QuickButton active={editMode==='OBJECT'} onClick={()=>setEditMode('OBJECT')} icon={<Box size={14}/>} label="Objeto" shortcut="1" />
-                    <QuickButton active={editMode==='FACE'}   onClick={()=>setEditMode('FACE')}   icon={<Layers size={14}/>} label="Cara" shortcut="2" />
-                    <QuickButton active={editMode==='EDGE'}   onClick={()=>setEditMode('EDGE')}   icon={<Layers3 size={14}/>} label="Borde" shortcut="3" />
-                    <QuickButton active={editMode==='VERTEX'} onClick={()=>setEditMode('VERTEX')} icon={<Dot size={14}/>} label="Vértice" shortcut="4" />
-                    <div className="w-px h-4 bg-zinc-800 mx-1" />
-                    <QuickButton active={transformMode==='translate'} onClick={()=>setTransformMode('translate')} icon={<Move size={14}/>} label="Mover" shortcut="W" />
-                    <QuickButton active={transformMode==='rotate'}    onClick={()=>setTransformMode('rotate')}    icon={<RotateCw size={14}/>} label="Rotar" shortcut="E" />
-                    <QuickButton active={transformMode==='scale'}     onClick={()=>setTransformMode('scale')}     icon={<Maximize size={14}/>} label="Escalar" shortcut="R" />
-                    <QuickButton active={transformMode==='universal'} onClick={()=>setTransformMode('universal')} icon={<Sparkles size={14}/>} label="Combinado" shortcut="U" />
-                    <div className="w-px h-4 bg-zinc-800 mx-1" />
-                    
-                    {/* Face Snapping Magnet (Retopology) */}
-                    <div className="relative flex items-center" ref={faceSnapRef}>
+                <motion.div 
+                  key="edit-quick"
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 10 }}
+                  className="flex items-center gap-1 bg-zinc-900/80 p-1 rounded-lg border border-white/10 shadow-xs"
+                >
+                  <QuickButton active={editMode==='OBJECT'} onClick={()=>setEditMode('OBJECT')} icon={<Box size={14}/>} label="Objeto" shortcut="1" />
+                  <QuickButton active={editMode==='FACE'}   onClick={()=>setEditMode('FACE')}   icon={<Layers size={14}/>} label="Cara" shortcut="2" />
+                  <QuickButton active={editMode==='EDGE'}   onClick={()=>setEditMode('EDGE')}   icon={<Layers3 size={14}/>} label="Borde" shortcut="3" />
+                  <QuickButton active={editMode==='VERTEX'} onClick={()=>setEditMode('VERTEX')} icon={<Dot size={14}/>} label="Vértice" shortcut="4" />
+                  {editMode === 'EDGE' && selectedObjectId && (
+                    <button
+                      type="button"
+                      onClick={() => useStore.getState().subdivideSelectedEdges(selectedObjectId)}
+                      className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                      title="Dividir / Subdividir borde seleccionado por la mitad"
+                    >
+                      <Combine size={12} />
+                      <span>Dividir Borde</span>
+                    </button>
+                  )}
+                  {editMode === 'VERTEX' && selectedObjectId && (
+                    <>
                       <button
                         type="button"
-                        onClick={() => toggleFaceSnap()}
-                        className={`flex items-center gap-1.5 px-2 py-1 rounded-l text-xs font-semibold transition-all border border-r-0 cursor-pointer ${
-                          faceSnapConfig?.enabled
-                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm'
-                            : 'bg-zinc-800/80 text-zinc-400 border-white/5 hover:text-zinc-200'
+                        onClick={() => useStore.getState().toggleInsertVertexMode()}
+                        className={`px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors border ${
+                          insertVertexMode
+                            ? 'bg-cyan-500/30 text-cyan-300 border-cyan-400 shadow-sm'
+                            : 'bg-zinc-800 text-zinc-300 border-white/10 hover:border-cyan-500/40'
                         }`}
-                        title={faceSnapConfig?.enabled ? 'Ajuste a Caras (Snapping): ACTIVO' : 'Activar Ajuste a Caras (Snapping de Retopología)'}
+                        title="Haz clic sobre cualquier segmento o borde para insertar un nuevo vértice en ese punto"
                       >
-                        <Magnet size={13} className={faceSnapConfig?.enabled ? 'text-amber-400' : 'text-zinc-400'} />
-                        <span className="text-[11px] hidden sm:inline">Imán Caras</span>
+                        <Plus size={12} />
+                        <span>+ Vértice</span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setShowFaceSnapMenu(v => !v)}
-                        className={`px-1 py-1 rounded-r border border-l-0 transition-all cursor-pointer ${
-                          faceSnapConfig?.enabled
-                            ? 'bg-amber-500/30 text-amber-300 border-amber-500/50'
-                            : 'bg-zinc-800/80 text-zinc-400 border-white/5 hover:text-zinc-200'
-                        }`}
-                        title="Opciones de Snapping (Project Individual Elements, Offset)"
-                      >
-                        <ChevronDown size={10} className={`transition-transform ${showFaceSnapMenu ? 'rotate-180' : ''}`} />
-                      </button>
-
-                      <AnimatePresence>
-                        {showFaceSnapMenu && (
-                          <motion.div
-                            initial={{ opacity: 0, y: -4, scale: 0.95 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: -4, scale: 0.95 }}
-                            transition={{ duration: 0.12 }}
-                            className="absolute z-[250] mt-1.5 top-full right-0 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-3 w-[260px] text-zinc-200 space-y-2.5 backdrop-blur-md"
-                          >
-                            <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
-                              <div className="flex items-center gap-1.5">
-                                <Magnet size={13} className="text-amber-400" />
-                                <span className="text-xs font-bold text-white">Ajuste a Caras (Snapping)</span>
-                              </div>
-                              <button onClick={() => setShowFaceSnapMenu(false)} className="text-zinc-500 hover:text-zinc-300 cursor-pointer">
-                                <X size={12} />
+                      {(() => {
+                        const obj = project.objects.find(o => o.id === selectedObjectId);
+                        if (obj?.type === 'SHAPE' || obj?.bezierHandles) {
+                          return (
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => useStore.getState().optimizeCurveShape?.(selectedObjectId)}
+                                className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+                                title="Optimizar y Aproximar Continuidad: Reduce el exceso de micro-vértices y trocitos de línea generados a mano alzada, aproximando una curva continua y suave"
+                              >
+                                <Sparkles size={12} className="text-emerald-400" />
+                                <span>✨ Optimizar Curva</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => useStore.getState().breakSelectedBezierHandles?.(selectedObjectId)}
+                                className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                                title="Desacoplar brazos Bézier: permite mover cada brazo/manecilla por separado de forma independiente (o mantén pulsado Alt al arrastrar)"
+                              >
+                                <Scissors size={12} />
+                                <span>Brazos Separados</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => useStore.getState().alignSelectedBezierHandles?.(selectedObjectId)}
+                                className="px-2 py-1 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/40 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                                title="Alinear brazos Bézier: acopla y alinea las manecillas para una curvatura suave y continua"
+                              >
+                                <Combine size={12} />
+                                <span>Alinear Brazos</span>
                               </button>
                             </div>
-
-                            <label className="flex items-center justify-between cursor-pointer p-1.5 rounded bg-zinc-950/60 border border-white/5 hover:border-amber-500/30">
-                              <span className="text-[11px] font-medium text-zinc-300">Activar Snapping</span>
-                              <input
-                                type="checkbox"
-                                checked={faceSnapConfig?.enabled ?? false}
-                                onChange={e => setFaceSnapConfig({ enabled: e.target.checked })}
-                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer"
-                              />
-                            </label>
-
-                            <label className="flex items-start justify-between gap-2 cursor-pointer p-1.5 rounded bg-zinc-950/60 border border-white/5 hover:border-amber-500/30">
-                              <div className="flex flex-col">
-                                <span className="text-[11px] font-medium text-zinc-200">Proyectar Elementos Individuales</span>
-                                <span className="text-[9px] text-zinc-400 leading-tight">Cada vértice se ajusta a la cara debajo independientemente en vez de como bloque</span>
-                              </div>
-                              <input
-                                type="checkbox"
-                                checked={faceSnapConfig?.projectIndividualElements ?? true}
-                                onChange={e => setFaceSnapConfig({ projectIndividualElements: e.target.checked })}
-                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer mt-0.5"
-                              />
-                            </label>
-
-                            <label className="flex items-start justify-between gap-2 cursor-pointer p-1.5 rounded bg-zinc-950/60 border border-white/5 hover:border-amber-500/30">
-                              <div className="flex flex-col">
-                                <span className="text-[11px] font-medium text-zinc-200">Alinear Rotación a la Cara</span>
-                                <span className="text-[9px] text-zinc-400 leading-tight">Orienta el objeto según la inclinación o normal de la superficie (Face Snapping de Blender)</span>
-                              </div>
-                              <input
-                                type="checkbox"
-                                checked={faceSnapConfig?.alignRotationToTarget ?? false}
-                                onChange={e => setFaceSnapConfig({ alignRotationToTarget: e.target.checked })}
-                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer mt-0.5"
-                              />
-                            </label>
-
-                            <label className="flex items-start justify-between gap-2 cursor-pointer p-1.5 rounded bg-zinc-950/60 border border-white/5 hover:border-amber-500/30">
-                              <div className="flex flex-col">
-                                <span className="text-[11px] font-medium text-zinc-200">Apoyar Base en Superficie</span>
-                                <span className="text-[9px] text-zinc-400 leading-tight">Apoya la base exterior del accesorio sobre la cara en vez de incrustar el centro a la mitad</span>
-                              </div>
-                              <input
-                                type="checkbox"
-                                checked={faceSnapConfig?.snapBaseToSurface ?? true}
-                                onChange={e => setFaceSnapConfig({ snapBaseToSurface: e.target.checked })}
-                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer mt-0.5"
-                              />
-                            </label>
-
-                            <div className="space-y-1 bg-zinc-950/60 p-1.5 rounded border border-white/5">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-medium text-zinc-300">Eje de Apoyo del Accesorio:</span>
-                                <span className="text-[10px] font-mono text-amber-300 font-bold">{faceSnapConfig?.alignmentAxis ?? '+Y'}</span>
-                              </div>
-                              <div className="grid grid-cols-3 gap-1 pt-0.5">
-                                {(['+Y', '+Z', '+X'] as const).map(axis => (
-                                  <button
-                                    key={axis}
-                                    type="button"
-                                    onClick={() => setFaceSnapConfig({ alignmentAxis: axis })}
-                                    className={`py-0.5 text-[8.5px] font-mono font-bold rounded cursor-pointer ${
-                                      (faceSnapConfig?.alignmentAxis ?? '+Y') === axis
-                                        ? 'bg-amber-500 text-black'
-                                        : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                                    }`}
-                                  >
-                                    {axis === '+Y' ? '+Y (Base)' : axis === '+Z' ? '+Z (Frente)' : '+X (Lateral)'}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-
-                            <div className="space-y-1 bg-zinc-950/60 p-1.5 rounded border border-white/5">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-medium text-zinc-300">Offset (Desplazamiento):</span>
-                                <span className="text-[10px] font-mono text-amber-300 font-bold">{faceSnapConfig?.offset ?? 0.002}</span>
-                              </div>
-                              <p className="text-[8.5px] text-zinc-400 leading-tight">Separa los vértices ligeramente de la cara para evitar parpadeo o que se hundan.</p>
-                              <div className="flex items-center gap-1 pt-1">
-                                {[0, 0.001, 0.002, 0.005, 0.01].map(off => (
-                                  <button
-                                    key={off}
-                                    type="button"
-                                    onClick={() => setFaceSnapConfig({ offset: off })}
-                                    className={`flex-1 py-0.5 text-[9px] font-mono font-bold rounded transition-colors cursor-pointer ${
-                                      (faceSnapConfig?.offset ?? 0.002) === off
-                                        ? 'bg-amber-500 text-black'
-                                        : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                                    }`}
-                                  >
-                                    {off === 0 ? '0' : off}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                if (selectedObjectId) {
-                                  const ok = await useStore.getState().alignToSurface(selectedObjectId);
-                                  if (!ok) {
-                                    useStore.getState().alignToGround(selectedObjectId);
-                                  }
-                                }
-                              }}
-                              disabled={!selectedObjectId}
-                              className="w-full py-1.5 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 disabled:opacity-40 text-black font-bold rounded text-[10px] shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                            >
-                              <Magnet size={12} />
-                              <span>🎯 Alinear y Pegar a Superficie (Snap)</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setShowFaceSnapDemoModal(true);
-                                setShowFaceSnapMenu(false);
-                              }}
-                              className="w-full py-1 text-[9px] text-amber-300 hover:text-amber-200 hover:bg-amber-950/40 rounded transition-colors flex items-center justify-center gap-1 cursor-pointer border border-amber-500/20"
-                            >
-                              <Sparkles size={11} className="text-amber-400" />
-                              <span>Ver Demo Guiada Paso a Paso</span>
-                            </button>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  </motion.div>
-                ) : showMainCreate ? (
-                  <motion.div 
-                    key="create-quick"
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 10 }}
-                    className="flex items-center gap-1 bg-zinc-900/50 p-1 rounded-lg border border-white/5"
-                  >
-                    <QuickButton active={createTab==='primitivo'} onClick={()=>setCreateTab('primitivo')} icon={<Box size={14}/>} label="Primitivos" />
-                    <QuickButton active={createTab==='dibujar'}   onClick={()=>setCreateTab('dibujar')}   icon={<Pencil size={14}/>} label="Dibujar" />
-                    <QuickButton active={createTab==='ingenieria'} onClick={()=>setCreateTab('ingenieria')} icon={<Combine size={14}/>} label="Ingeniería" />
-                  </motion.div>
-                ) : null}
+                          );
+                        }
+                        return null;
+                      })()}
+                    </>
+                  )}
+                  <div className="w-px h-4 bg-zinc-800 mx-1" />
+                  <QuickButton active={transformMode==='translate'} onClick={()=>setTransformMode('translate')} icon={<Move size={14}/>} label="Mover" shortcut="W" />
+                  <QuickButton active={transformMode==='rotate'}    onClick={()=>setTransformMode('rotate')}    icon={<RotateCw size={14}/>} label="Rotar" shortcut="E" />
+                  <QuickButton active={transformMode==='scale'}     onClick={()=>setTransformMode('scale')}     icon={<Maximize size={14}/>} label="Escalar" shortcut="R" />
+                  <QuickButton active={transformMode==='universal'} onClick={()=>setTransformMode('universal')} icon={<Sparkles size={14}/>} label="Combinado" shortcut="U" />
+                </motion.div>
               </AnimatePresence>
             </div>
           )}
@@ -3402,57 +3308,235 @@ const ShapePicker: React.FC<{
 const LatheFromShapeTab: React.FC<{
   latPickedId:string|null; setLatPickedId:(v:string|null)=>void;
   latAxis:'x'|'y'|'z'; setLatAxis:(v:'x'|'y'|'z')=>void;
+  latAxisPos:number; setLatAxisPos:(v:number)=>void;
   latAngle:number; setLatAngle:(v:number)=>void;
   latSegs:number;  setLatSegs:(v:number)=>void;
   latOffset:number; setLatOffset:(v:number)=>void;
+  latLivePreview:boolean; setLatLivePreview:(v:boolean)=>void;
   project:any;
   onGenerate:(v:V3[],f:MeshFace[],n:string)=>void;
-}> = ({latPickedId,setLatPickedId,latAxis,setLatAxis,latAngle,setLatAngle,latSegs,setLatSegs,latOffset,setLatOffset,project,onGenerate})=>{
-  const pickedObj = project.objects.find((o:any)=>o.id===latPickedId);
+}> = ({latPickedId,setLatPickedId,latAxis,setLatAxis,latAxisPos,setLatAxisPos,latAngle,setLatAngle,latSegs,setLatSegs,latOffset,setLatOffset,latLivePreview,setLatLivePreview,project,onGenerate})=>{
+  const selectedObjectId = useStore(s => s.selectedObjectId);
+  
+  // Auto-pick shape if selected
+  useEffect(() => {
+    if (!latPickedId && selectedObjectId) {
+      const allObjects = useStore.getState().project.objects;
+      const cur = allObjects.find((o: any) => o.id === selectedObjectId);
+      if (cur && cur.type === 'SHAPE') {
+        setLatPickedId(selectedObjectId);
+      }
+    }
+  }, [selectedObjectId, latPickedId]);
+
+  const pickedObj = project.objects.find((o: any) => o.id === latPickedId);
+
+  // Compute shape extents along axis safely without stack overflow
+  const bounds = React.useMemo(() => {
+    if (!pickedObj || !pickedObj.vertices || pickedObj.vertices.length === 0) return { min: 0, max: 0, center: 0 };
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < pickedObj.vertices.length; i++) {
+      const v = pickedObj.vertices[i];
+      const off = pickedObj.vertexOffsets?.[i] ?? [0, 0, 0];
+      const coord = (latAxis === 'y' || latAxis === 'z') ? (v[0] + off[0]) : (v[1] + off[1]);
+      if (coord < min) min = coord;
+      if (coord > max) max = coord;
+    }
+    if (!Number.isFinite(min)) min = 0;
+    if (!Number.isFinite(max)) max = 0;
+    const center = (min + max) / 2;
+    return { min, max, center };
+  }, [pickedObj, latAxis]);
+
+  // Sync with global store latheConfig so Viewport can show virtual axis line
+  useEffect(() => {
+    useStore.getState().setLatheConfig({
+      active: true,
+      sourceShapeId: latPickedId,
+      axis: latAxis,
+      axisPos: latAxisPos,
+      axisOffset: latOffset,
+      angle: latAngle,
+      segments: latSegs,
+      livePreview: latLivePreview,
+    });
+    return () => {
+      useStore.getState().setLatheConfig({ active: false });
+    };
+  }, [latPickedId, latAxis, latAxisPos, latOffset, latAngle, latSegs, latLivePreview]);
+
+  const handleAxisPosChange = (val: number) => {
+    setLatAxisPos(val);
+    useStore.getState().updateLatheAxisPos(val);
+  };
+
   return(<>
     <PTitle icon="⊙" title="Torno — Revolución libre"
-      desc="Dibuja el perfil 2D en vista FRONTAL, selecciónalo aquí y genera la revolución."/>
-    <div className="bg-zinc-800/40 rounded p-2 text-[9px] text-zinc-500 space-y-1">
-      <p className="text-zinc-300 font-bold">Cómo usar:</p>
-      <p>① Activa las herramientas de dibujo (Lápiz) en la barra superior</p>
-      <p>② Dibuja la <b>mitad del perfil</b> en vista FRONTAL (el lado derecho del objeto)</p>
-      <p>③ Haz doble clic para finalizar la forma</p>
-      <p>④ Selecciona la forma aquí y configura los parámetros</p>
+      desc="Gira un perfil 2D alrededor de una línea de eje personalizable para crear sólidos 3D con actualización en tiempo real."/>
+    
+    <div className="bg-amber-950/20 border border-amber-500/30 rounded-lg p-2 text-[9px] text-amber-200/90 space-y-1">
+      <div className="flex items-center gap-1.5 font-bold text-amber-300">
+        <Sparkles size={12} className="text-amber-400" />
+        <span>Línea de Eje Virtual Interactiva</span>
+      </div>
+      <p>La línea dorada de rotación es visible en los visores (especialmente en vista FRONTAL). Puedes <b>mover los controles abajo</b> o <b>arrastrar la línea directamente en el visor</b> con el ratón.</p>
     </div>
+
     <ShapePicker project={project} pickedId={latPickedId} onPick={setLatPickedId} label="Perfil 2D dibujado"/>
-    {pickedObj&&<div className="bg-emerald-900/30 border border-emerald-800/50 rounded p-2 text-[9px] text-emerald-400">
-      ✓ <b>{pickedObj.name}</b> — {pickedObj.vertices.length} puntos
+    
+    {pickedObj&&<div className="bg-emerald-900/30 border border-emerald-800/50 rounded p-2 text-[9px] text-emerald-400 flex items-center justify-between">
+      <span>✓ <b>{pickedObj.name}</b> — {pickedObj.vertices.length} puntos</span>
+      <span className="font-mono text-[8.5px] text-emerald-300">Rango: [{bounds.min.toFixed(2)} .. {bounds.max.toFixed(2)}]</span>
     </div>}
-    <CRow label="Eje">
+    
+    <CRow label="Eje de Giro">
       <div className="flex gap-1">
         {(['x','y','z'] as const).map(ax=>(
-          <button key={ax} onClick={()=>setLatAxis(ax)}
-            className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-colors ${latAxis===ax?'bg-indigo-600 text-white':'bg-zinc-700 text-zinc-400 hover:bg-zinc-600'}`}>{ax}
+          <button key={ax} onClick={()=>{
+            setLatAxis(ax);
+            useStore.getState().setLatheConfig({ axis: ax });
+          }}
+            className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-colors ${latAxis===ax?'bg-indigo-600 text-white shadow':'bg-zinc-700 text-zinc-400 hover:bg-zinc-600'}`}>{ax}
           </button>
         ))}
       </div>
     </CRow>
+
+    {/* ── Posición del Eje de Rotación (Línea Virtual) ── */}
+    <div className="p-2.5 bg-zinc-900/80 rounded-lg border border-white/10 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-bold text-amber-300 flex items-center gap-1">
+          <span>⟲ Posición del Eje (Línea Virtual)</span>
+        </span>
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            step={0.05}
+            value={latAxisPos}
+            onChange={e => handleAxisPosChange(parseFloat(e.target.value) || 0)}
+            className="w-16 px-1.5 py-0.5 bg-zinc-800 rounded text-[10px] font-mono text-amber-300 font-bold border border-amber-500/40 text-right"
+          />
+          <span className="text-[9px] text-zinc-500 font-mono">u</span>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span className="text-[8.5px] text-zinc-500 font-mono">{(bounds.min - 2).toFixed(1)}</span>
+        <input
+          type="range"
+          min={bounds.min - 3}
+          max={bounds.max + 3}
+          step={0.02}
+          value={latAxisPos}
+          onChange={e => handleAxisPosChange(parseFloat(e.target.value))}
+          className="flex-1 accent-amber-500 h-1.5 cursor-pointer"
+        />
+        <span className="text-[8.5px] text-zinc-500 font-mono">{(bounds.max + 3).toFixed(1)}</span>
+      </div>
+
+      {/* Botones de Ajuste Rápido del Eje */}
+      <div className="grid grid-cols-4 gap-1 pt-1">
+        <button
+          type="button"
+          onClick={() => handleAxisPosChange(safeParseFixed(bounds.min, 3, 0))}
+          className="py-1 px-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[8.5px] font-bold border border-white/5 truncate"
+          title={`Alinear eje al extremo izquierdo de la figura (${bounds.min.toFixed(2)})`}
+        >
+          Izq (Min)
+        </button>
+        <button
+          type="button"
+          onClick={() => handleAxisPosChange(safeParseFixed(bounds.center, 3, 0))}
+          className="py-1 px-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[8.5px] font-bold border border-white/5 truncate"
+          title={`Alinear eje al centro del perfil (${bounds.center.toFixed(2)})`}
+        >
+          Centro
+        </button>
+        <button
+          type="button"
+          onClick={() => handleAxisPosChange(safeParseFixed(bounds.max, 3, 0))}
+          className="py-1 px-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[8.5px] font-bold border border-white/5 truncate"
+          title={`Alinear eje al extremo derecho de la figura (${bounds.max.toFixed(2)})`}
+        >
+          Der (Max)
+        </button>
+        <button
+          type="button"
+          onClick={() => handleAxisPosChange(0)}
+          className="py-1 px-1 bg-zinc-800 hover:bg-zinc-700 text-amber-300 rounded text-[8.5px] font-bold border border-amber-500/20 truncate"
+          title="Centrar eje en el origen 0.0"
+        >
+          Origen 0
+        </button>
+      </div>
+    </div>
+
+    <CRow label="Dist. eje (Hueco)">
+      <input type="number" step={0.05} value={latOffset} onChange={e=>{
+        const val = +e.target.value;
+        setLatOffset(val);
+        useStore.getState().setLatheConfig({ axisOffset: val });
+      }}
+        className="w-16 px-2 py-1 bg-zinc-800 rounded text-[11px] text-zinc-200 border border-zinc-700"/>
+      <span className="text-[9px] text-zinc-500">u (separación radial)</span>
+    </CRow>
+
     <CRow label="Ángulo °">
-      <input type="range" min={1} max={360} value={latAngle} onChange={e=>setLatAngle(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/>
+      <input type="range" min={1} max={360} value={latAngle} onChange={e=>{
+        const val = +e.target.value;
+        setLatAngle(val);
+        useStore.getState().setLatheConfig({ angle: val });
+      }} className="flex-1 accent-violet-500 h-1.5"/>
       <CVal>{latAngle}°</CVal>
     </CRow>
+
     <CRow label="Segmentos">
-      <input type="range" min={4} max={128} value={latSegs} onChange={e=>setLatSegs(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/>
+      <input type="range" min={4} max={128} value={latSegs} onChange={e=>{
+        const val = +e.target.value;
+        setLatSegs(val);
+        useStore.getState().setLatheConfig({ segments: val });
+      }} className="flex-1 accent-violet-500 h-1.5"/>
       <CVal>{latSegs}</CVal>
     </CRow>
-    <CRow label="Dist. eje">
-      <input type="number" step={0.05} value={latOffset} onChange={e=>setLatOffset(+e.target.value)}
-        className="w-16 px-2 py-1 bg-zinc-800 rounded text-[11px] text-zinc-200 border border-zinc-700"/>
-      <span className="text-[9px] text-zinc-500">u (hueco interior)</span>
-    </CRow>
+
+    <label className="flex items-center justify-between p-1.5 rounded bg-zinc-900/60 border border-white/5 cursor-pointer">
+      <span className="text-[9.5px] text-zinc-300 font-medium">Actualización en tiempo real al mover el eje</span>
+      <input
+        type="checkbox"
+        checked={latLivePreview}
+        onChange={e => {
+          setLatLivePreview(e.target.checked);
+          useStore.getState().setLatheConfig({ livePreview: e.target.checked });
+        }}
+        className="w-3.5 h-3.5 accent-violet-500 rounded cursor-pointer"
+      />
+    </label>
+
     <button disabled={!latPickedId||!pickedObj} onClick={()=>{
       if(!pickedObj) return;
-      const profile = shapeToProfile(pickedObj, latAxis);
+      const profile = shapeToProfile(pickedObj, latAxis, latAxisPos);
       if(profile.length<2){alert('El perfil necesita al menos 2 puntos');return;}
-      const{vertices,faces}=revolveMesh(profile,latSegs,latAngle,latAxis,latOffset,latAngle>=359);
-      if(!vertices.length){alert('Error al generar. Comprueba que el perfil está a un lado del eje.');return;}
+      const{vertices,faces}=revolveMesh(profile,latSegs,latAngle,latAxis,latOffset,latAngle>=359,latAxisPos);
+      if(!vertices.length){alert('Error al generar. Comprueba que el perfil tiene puntos válidos.');return;}
+      
       onGenerate(vertices,faces,`Torno - ${pickedObj.name}`);
-    }} className={`w-full py-2 rounded text-[11px] font-bold transition-colors ${(latPickedId&&pickedObj)?'bg-violet-600 hover:bg-violet-500 text-white':'bg-zinc-700 text-zinc-500 cursor-not-allowed'}`}>
+      
+      setTimeout(() => {
+        const newlyCreatedId = useStore.getState().selectedObjectId;
+        if (newlyCreatedId) {
+          useStore.getState().setLatheConfig({
+            targetMeshId: newlyCreatedId,
+            sourceShapeId: latPickedId,
+            axisPos: latAxisPos,
+            axis: latAxis,
+            axisOffset: latOffset,
+            angle: latAngle,
+            segments: latSegs,
+          });
+        }
+      }, 50);
+    }} className={`w-full py-2 rounded text-[11px] font-bold transition-colors ${(latPickedId&&pickedObj)?'bg-violet-600 hover:bg-violet-500 text-white shadow-lg cursor-pointer':'bg-zinc-700 text-zinc-500 cursor-not-allowed'}`}>
       ⊙ Generar revolución
     </button>
   </>);

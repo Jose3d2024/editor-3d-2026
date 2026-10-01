@@ -203,7 +203,7 @@ export interface ShapeParameters {
   height?:          number;
   thetaSegments?:   number;
   sphereType?:      'UV' | 'ICO';
-  shapeType?:       'line' | 'rect' | 'bezier' | 'custom';
+  shapeType?:       'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline' | 'custom';
   closed?:          boolean;
 
   // ── 3ds Max GeoSphere Parameters ──
@@ -747,8 +747,24 @@ export interface MeshProcessingState {
   finalFaceCount?: number;
 }
 
+export interface LatheConfig {
+  active: boolean;
+  sourceShapeId: string | null;
+  targetMeshId: string | null;
+  axis: 'x' | 'y' | 'z';
+  axisPos: number; // Coordinate of the rotation axis line
+  axisOffset: number; // Distance/gap offset (hueco interior)
+  angle: number; // 1 to 360 degrees
+  segments: number; // 4 to 128
+  livePreview: boolean;
+  isDraggingAxis?: boolean;
+}
+
 export interface AppState {
   project:           Project;
+  latheConfig:       LatheConfig;
+  setLatheConfig:    (cfg: Partial<LatheConfig>) => void;
+  updateLatheAxisPos: (axisPos: number) => void;
   meshProcessing?:   MeshProcessingState | null;
   closeMeshProcessing: () => void;
   selectedObjectId:  string | null;
@@ -770,8 +786,12 @@ export interface AppState {
   editMode:       EditMode;
   transformMode:  TransformMode;
   transformSpace: TransformSpace;
-  drawMode:       'line' | 'rect' | 'bezier' | null;
+  drawMode:       'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline' | null;
   drawColor:      string;
+  breakSelectedBezierHandles?: (id: string, vertexIndices?: number[]) => void;
+  alignSelectedBezierHandles?: (id: string, vertexIndices?: number[]) => void;
+  autoSmoothSelectedBezierHandles?: (id: string, vertexIndices?: number[]) => void;
+  optimizeCurveShape?: (id: string, tolerance?: number) => void;
   orthoDrawMode:  boolean;
   setOrthoDrawMode: (enabled: boolean) => void;
   drawLockAxis:   'FREE' | 'ORTHO_90' | 'X' | 'Y' | 'Z';

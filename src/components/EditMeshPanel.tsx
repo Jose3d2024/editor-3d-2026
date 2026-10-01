@@ -498,6 +498,22 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
             </p>
 
         <div className="grid grid-cols-2 gap-1.5">
+          {/* Optimizar Curva / Aproximar Continuidad */}
+          {isShape && (
+            <button
+              type="button"
+              onClick={() => {
+                useStore.getState().optimizeCurveShape?.(obj.id);
+                showFeedback('Curva optimizada y suavizada con éxito');
+              }}
+              className="py-2 px-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 border border-emerald-400/50 transition-all shadow cursor-pointer col-span-2"
+              title="Reduce el exceso de micro-vértices y trozos de línea generados a mano alzada, aproximando una curva continua y suave"
+            >
+              <Sparkles size={13} className="text-emerald-200" />
+              <span>✨ Optimizar Curva / Aproximar Continuidad</span>
+            </button>
+          )}
+
           {/* Conectar Vértices con Línea (J) */}
           <button
             type="button"

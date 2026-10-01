@@ -571,6 +571,45 @@ export const PrecisionDrawToolbar: React.FC = () => {
             </span>
           </div>
 
+          {/* Optimizar Curva / Aproximar Continuidad */}
+          {(isShape || selectedObj?.bezierHandles) && (
+            <button
+              type="button"
+              onClick={() => {
+                useStore.getState().optimizeCurveShape?.(selectedObjectId!);
+              }}
+              className="px-2.5 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white border border-emerald-400 shadow-sm"
+              title="Optimizar y Aproximar Continuidad: Reduce el exceso de micro-vértices y trocitos de línea generados a mano alzada y crea una curva Bézier suave y continua"
+            >
+              <Sparkles size={11} className="text-emerald-200" />
+              <span>✨ Optimizar Curva</span>
+            </button>
+          )}
+
+          {/* Desacoplar / Alinear Brazos */}
+          {(isShape || selectedObj?.bezierHandles) && (
+            <>
+              <button
+                type="button"
+                onClick={() => useStore.getState().breakSelectedBezierHandles?.(selectedObjectId!)}
+                className="px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 transition-all cursor-pointer bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40"
+                title="Desacoplar Brazos: permite mover las manecillas izquierda/derecha de forma independiente (Alt)"
+              >
+                <Scissors size={11} />
+                <span>Brazos Separados</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => useStore.getState().alignSelectedBezierHandles?.(selectedObjectId!)}
+                className="px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 transition-all cursor-pointer bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/40"
+                title="Alinear Brazos: acopla y alinea las manecillas para lograr una curvatura suave y continua"
+              >
+                <Link2 size={11} />
+                <span>Alinear Brazos</span>
+              </button>
+            </>
+          )}
+
           {/* Conectar Vértices con Línea */}
           <button
             type="button"
@@ -701,10 +740,15 @@ export const PrecisionDrawToolbar: React.FC = () => {
             <button
               type="button"
               onClick={() => toggleShapeClosed(selectedObjectId!)}
-              className="px-2 py-0.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700 rounded-full text-[10px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
-              title="Cerrar o abrir la línea (C)"
+              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 transition-all cursor-pointer border ${
+                selectedObj?.parameters?.closed
+                  ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/50 hover:bg-emerald-600/50 shadow-sm'
+                  : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:bg-zinc-800'
+              }`}
+              title="Cerrar o abrir el contorno de la línea/curva (C)"
             >
-              <span>{selectedObj?.parameters?.closed ? 'Abrir' : 'Cerrar (C)'}</span>
+              <Link2 size={11} className={selectedObj?.parameters?.closed ? 'text-emerald-400' : 'text-zinc-400'} />
+              <span>{selectedObj?.parameters?.closed ? 'Cerrada (ON)' : 'Cerrar (OFF)'}</span>
             </button>
           )}
         </>

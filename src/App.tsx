@@ -49,6 +49,11 @@ export default function App() {
           setIsTimelineCollapsed(prev => !prev);
         }
       }
+      if (e.key === 'Escape') {
+        const state = useStore.getState();
+        if (state.drawMode) state.setDrawMode(null);
+        if (state.insertVertexMode) state.toggleInsertVertexMode(false);
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);

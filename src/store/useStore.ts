@@ -6,7 +6,7 @@ import { generatePrimitive } from '../utils/geometry';
 import { createBaseGeometry } from '../utils/csg';
 import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces, fromThreeGeometry } from '../utils/modifiers';
 import { bevelMeshAdvanced } from '../utils/bevel';
-import { simplifyMesh, convertImportedToCSG } from '../utils/modifiers_advanced';
+import { simplifyMesh, convertImportedToCSG, shapeToProfile, revolveMesh } from '../utils/modifiers_advanced';
 import { applyNoiseToMesh, type NoiseDeformConfig } from '../utils/meshNoise';
 import { executeUnifiedBoolean, BooleanExecuteOptions, BooleanResult, UnifiedBooleanOp } from '../utils/booleanOperations';
 import { getDefaultMaterials } from '../utils/defaultMaterials';
@@ -48,6 +48,7 @@ import {
 import type { NurbsKnotType } from '../utils/nurbs';
 import { snapPointToSurfaces, alignObjectRotationToNormal, getObjectBaseExtentAlongNormal } from '../utils/faceSnap';
 import { getLinkedSelection } from '../utils/meshCleanUp';
+import { optimizeAndFitSmoothCurve, simplifyPolylineRDP } from '../utils/curveOptimization';
 
 const DEFAULT_CUBE_GEOM = generatePrimitive('CUBE', { segments: 1 });
 
@@ -623,6 +624,69 @@ export const useStore = create<Store>()((set, get) => ({
   loopCutSlide: 0.5,
   setLoopCutSlide: (slide) => set({ loopCutSlide: slide }),
   moveReferenceMode: false,
+  latheConfig: {
+    active: false,
+    sourceShapeId: null,
+    targetMeshId: null,
+    axis: 'y',
+    axisPos: 0,
+    axisOffset: 0,
+    angle: 360,
+    segments: 32,
+    livePreview: true,
+    isDraggingAxis: false,
+  },
+  setLatheConfig: (cfg) => {
+    const prev = get().latheConfig;
+    const next = { ...prev, ...cfg };
+    set({ latheConfig: next });
+  },
+  updateLatheAxisPos: (axisPos) => {
+    const state = get();
+    const cfg = { ...state.latheConfig, axisPos };
+    set({ latheConfig: cfg });
+
+    if (cfg.livePreview && cfg.targetMeshId && cfg.sourceShapeId) {
+      const sourceObj = state.project.objects.find(o => o.id === cfg.sourceShapeId);
+      const targetObj = state.project.objects.find(o => o.id === cfg.targetMeshId);
+      if (sourceObj && targetObj) {
+        const profile = shapeToProfile(sourceObj, cfg.axis, axisPos);
+        if (profile.length >= 2) {
+          const { vertices, faces } = revolveMesh(
+            profile,
+            cfg.segments,
+            cfg.angle,
+            cfg.axis,
+            cfg.axisOffset,
+            cfg.angle >= 359,
+            axisPos
+          );
+          if (vertices.length > 0) {
+            // Direct state mutation to avoid triggering history or infinite reactive loops
+            set(s => ({
+              project: {
+                ...s.project,
+                objects: s.project.objects.map(o => o.id === cfg.targetMeshId ? {
+                  ...o,
+                  vertices,
+                  faces,
+                  parameters: {
+                    ...o.parameters,
+                    genAxis: cfg.axis,
+                    genAngle: cfg.angle,
+                    genSegs: cfg.segments,
+                    genAxisPos: axisPos,
+                    genAxisOffset: cfg.axisOffset,
+                    genSourceShapeId: cfg.sourceShapeId,
+                  }
+                } : o)
+              }
+            }));
+          }
+        }
+      }
+    }
+  },
   history: [DEFAULT_PROJECT],
   historySteps: [
     {
@@ -1581,19 +1645,26 @@ export const useStore = create<Store>()((set, get) => ({
       ? customHandles.map(h => ({ broken: h.broken, out: [...h.out] as V3, in: [...h.in] as V3 }))
       : vertices.map(() => ({ out: [0,0,0] as V3, in: [0,0,0] as V3, broken: false }));
 
-    // Always auto-smooth zero handles for bezier type.
-    // Fixes: clicking without dragging → all [0,0,0] handles → straight lines.
-    if (type === 'bezier') {
-      handles = autoSmoothBezierHandles(vertices, handles, closed);
+    let finalVerts = vertices;
+    let finalHandles = handles;
+
+    if (type === 'freehand') {
+      const opt = optimizeAndFitSmoothCurve(vertices, closed, 0.08);
+      finalVerts = opt.vertices;
+      finalHandles = opt.handles;
+    } else if (type === 'bezier' || type === 'smooth') {
+      finalHandles = autoSmoothBezierHandles(vertices, handles, closed);
     }
+
+    const effectiveShapeType = (type === 'smooth' || type === 'freehand') ? 'bezier' : type;
 
     const newObj: CSGObject = {
       id: genId(),
-      name: `Forma ${state.project.objects.length + 1}`,
+      name: `${type === 'smooth' ? 'Curva Suave' : type === 'freehand' ? 'Trazo Libre' : type === 'bezier' ? 'Curva Bézier' : 'Forma'} ${state.project.objects.length + 1}`,
       type: 'SHAPE', operation: 'ADD',
       transform: { position:[0,0,0], rotation:[0,0,0], scale:[1,1,1] },
-      parameters: { shapeType: type, closed, segments: type === 'bezier' ? 20 : 1 },
-      vertices, bezierHandles: handles, faces: [],
+      parameters: { shapeType: effectiveShapeType, closed, segments: 24 },
+      vertices: finalVerts, bezierHandles: finalHandles, faces: [],
       color: state.drawColor, smoothShading: false, opacity: 1, visible: true, keyframes: [],
     };
     set({
@@ -1802,13 +1873,114 @@ export const useStore = create<Store>()((set, get) => ({
       const handles = [...o.bezierHandles];
       const h = { ...handles[index] };
       if (side === 'out') h.out = offset; else h.in = offset;
-      if (!broken && !h.broken) {
+      if (broken || h.broken) {
+        h.broken = true;
+      } else {
         if (side === 'out') h.in  = [-offset[0], -offset[1], -offset[2]];
         else                h.out = [-offset[0], -offset[1], -offset[2]];
       }
       handles[index] = h;
       return { ...o, bezierHandles: handles };
     })}});
+  },
+
+  breakSelectedBezierHandles: (id: string, vertexIndices?: number[]) => {
+    const { project, selectedVertexIndices } = get();
+    const indices = vertexIndices && vertexIndices.length > 0 ? vertexIndices : selectedVertexIndices;
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.bezierHandles) return;
+
+    const handles = [...obj.bezierHandles];
+    const targets = indices.map(i => (i >= 20000 ? i - 20000 : (i >= 10000 ? i - 10000 : i)));
+    targets.forEach(idx => {
+      if (handles[idx]) {
+        handles[idx] = { ...handles[idx], broken: true };
+      }
+    });
+
+    set({ project: { ...project, objects: project.objects.map(o => o.id === id ? { ...o, bezierHandles: handles } : o) } });
+    get().saveHistory('Desacoplar Manecillas Bézier', 'edit');
+  },
+
+  alignSelectedBezierHandles: (id: string, vertexIndices?: number[]) => {
+    const { project, selectedVertexIndices } = get();
+    const indices = vertexIndices && vertexIndices.length > 0 ? vertexIndices : selectedVertexIndices;
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.bezierHandles) return;
+
+    const handles = [...obj.bezierHandles];
+    const targets = indices.map(i => (i >= 20000 ? i - 20000 : (i >= 10000 ? i - 10000 : i)));
+    targets.forEach(idx => {
+      if (handles[idx]) {
+        const h = handles[idx];
+        const outLen = Math.hypot(h.out[0], h.out[1], h.out[2]);
+        const inLen = Math.hypot(h.in[0], h.in[1], h.in[2]);
+        let dir: V3 = [1, 0, 0];
+        if (outLen > 0.001) {
+          dir = [h.out[0] / outLen, h.out[1] / outLen, h.out[2] / outLen];
+        } else if (inLen > 0.001) {
+          dir = [-h.in[0] / inLen, -h.in[1] / inLen, -h.in[2] / inLen];
+        }
+        const len = Math.max(outLen, inLen, 0.2);
+        handles[idx] = {
+          out: [dir[0] * len, dir[1] * len, dir[2] * len],
+          in:  [-dir[0] * len, -dir[1] * len, -dir[2] * len],
+          broken: false
+        };
+      }
+    });
+
+    set({ project: { ...project, objects: project.objects.map(o => o.id === id ? { ...o, bezierHandles: handles } : o) } });
+    get().saveHistory('Alinear Manecillas Bézier', 'edit');
+  },
+
+  autoSmoothSelectedBezierHandles: (id: string, vertexIndices?: number[]) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) return;
+
+    const isClosed = !!obj.parameters?.closed;
+    const smoothed = autoSmoothBezierHandles(obj.vertices, obj.bezierHandles || [], isClosed);
+
+    set({ project: { ...project, objects: project.objects.map(o => o.id === id ? { ...o, bezierHandles: smoothed } : o) } });
+    get().saveHistory('Auto-Suavizar Manecillas', 'edit');
+  },
+
+  optimizeCurveShape: (id: string, tolerance: number = 0.09) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices || obj.vertices.length < 2) return;
+
+    // Bake current vertex offsets to get true geometry positions
+    const currentVerts: V3[] = obj.vertices.map((v, i) => {
+      const off = obj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]];
+    });
+
+    const isClosed = !!obj.parameters?.closed;
+    const { vertices: newVerts, handles: newHandles } = optimizeAndFitSmoothCurve(currentVerts, isClosed, tolerance);
+
+    set({
+      project: {
+        ...project,
+        objects: project.objects.map(o => {
+          if (o.id !== id) return o;
+          return {
+            ...o,
+            vertices: newVerts,
+            bezierHandles: newHandles,
+            vertexOffsets: {},
+            parameters: {
+              ...o.parameters,
+              shapeType: 'bezier',
+              segments: 24,
+            },
+          };
+        }),
+      },
+      selectedVertexIndices: [],
+    });
+    get().saveHistory(`Optimizar Curva (${currentVerts.length} → ${newVerts.length} pts)`, 'edit');
   },
 
   // ── Remove / Duplicate ────────────────────────────────────────────────────
@@ -5305,20 +5477,9 @@ export const useStore = create<Store>()((set, get) => ({
     const obj = project.objects.find(o => o.id === id);
     if (!obj || !obj.vertices) return;
     const isClosed = !obj.parameters.closed;
-    let verts = [...obj.vertices];
+    const verts = [...obj.vertices];
     let handles = obj.bezierHandles ? [...obj.bezierHandles] : undefined;
 
-    if (isClosed && verts.length >= 3) {
-      const d = Math.hypot(
-        verts[0][0] - verts[verts.length - 1][0],
-        verts[0][1] - verts[verts.length - 1][1],
-        verts[0][2] - verts[verts.length - 1][2]
-      );
-      if (d < 0.25) {
-        verts.pop();
-        if (handles) handles.pop();
-      }
-    }
     if (obj.parameters.shapeType === 'bezier' && handles) {
       handles = autoSmoothBezierHandles(verts, handles, isClosed);
     }
@@ -6501,6 +6662,10 @@ export const useStore = create<Store>()((set, get) => ({
 
         if (edgePos === -1) {
           newFaces.push(face);
+        } else if (face.indices.length === 2) {
+          newFaces.push({ ...face, indices: [face.indices[0], midIdx] });
+          newFaces.push({ ...face, indices: [midIdx, face.indices[1]] });
+          splitCount++;
         } else {
           const updatedIndices = [...face.indices];
           updatedIndices.splice(edgePos + 1, 0, midIdx);
