@@ -237,21 +237,36 @@ const createVertexPointTexture = (shape: 'circle' | 'cross' = 'circle'): THREE.C
 
 const VERTEX_DOT_TEXTURE = typeof document !== 'undefined' ? createVertexPointTexture('circle') : null;
 const VERTEX_CROSS_TEXTURE = typeof document !== 'undefined' ? createVertexPointTexture('cross') : null;
+if (VERTEX_DOT_TEXTURE) VERTEX_DOT_TEXTURE.userData = { isShared: true };
+if (VERTEX_CROSS_TEXTURE) VERTEX_CROSS_TEXTURE.userData = { isShared: true };
 
 const SHARED_VERTEX_GEO = new THREE.SphereGeometry(1, 6, 5);
+SHARED_VERTEX_GEO.userData = { isShared: true };
 const SHARED_PICK_GEO = new THREE.SphereGeometry(1, 6, 4);
+SHARED_PICK_GEO.userData = { isShared: true };
 const SHARED_SNAP_RING_GEO = new THREE.RingGeometry(0.02, 0.032, 16);
+SHARED_SNAP_RING_GEO.userData = { isShared: true };
 
 const SHARED_WHITE_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+SHARED_WHITE_MAT.userData = { isShared: true };
 const SHARED_SELECTED_MAT = new THREE.MeshBasicMaterial({ color: 0xef4444, depthTest: false });
+SHARED_SELECTED_MAT.userData = { isShared: true };
 const SHARED_START_MAT = new THREE.MeshBasicMaterial({ color: 0x10b981, depthTest: false });
+SHARED_START_MAT.userData = { isShared: true };
 const SHARED_ACTIVE_MAT = new THREE.MeshBasicMaterial({ color: 0xef4444, depthTest: false });
+SHARED_ACTIVE_MAT.userData = { isShared: true };
 const SHARED_OUT_MAT = new THREE.MeshBasicMaterial({ color: 0x3b82f6, depthTest: false });
+SHARED_OUT_MAT.userData = { isShared: true };
 const SHARED_IN_MAT = new THREE.MeshBasicMaterial({ color: 0x22c55e, depthTest: false });
+SHARED_IN_MAT.userData = { isShared: true };
 const SHARED_SNAP_MAT = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.9 });
+SHARED_SNAP_MAT.userData = { isShared: true };
 const SHARED_SNAP_DOT_MAT = new THREE.MeshBasicMaterial({ color: 0x00ffcc, depthTest: false });
+SHARED_SNAP_DOT_MAT.userData = { isShared: true };
 const SHARED_PICK_MAT = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+SHARED_PICK_MAT.userData = { isShared: true };
 const SHARED_CYAN_MAT = new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false });
+SHARED_CYAN_MAT.userData = { isShared: true };
 
 // Screen-space 2D Points Materials with constant pixel size (virtually 0 CPU/GPU cost, never scales up on zoom)
 const SHARED_POINTS_MAT = new THREE.PointsMaterial({
@@ -263,6 +278,7 @@ const SHARED_POINTS_MAT = new THREE.PointsMaterial({
   alphaTest: 0.05,
   depthTest: false,
 });
+SHARED_POINTS_MAT.userData = { isShared: true };
 
 const SHARED_SEL_POINTS_MAT = new THREE.PointsMaterial({
   size: 9.5,
@@ -273,6 +289,7 @@ const SHARED_SEL_POINTS_MAT = new THREE.PointsMaterial({
   alphaTest: 0.05,
   depthTest: false,
 });
+SHARED_SEL_POINTS_MAT.userData = { isShared: true };
 
 /**
  * Calcula un tamaño de escala constante en píxeles de pantalla para punteros, indicadores y halos
@@ -1138,14 +1155,21 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     camera.add(editorHeadlight);
     scene.add(camera);
 
-    const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false, powerPreference:'high-performance', preserveDrawingBuffer:true });
+    const shouldEnableShadows = (type === 'PERSPECTIVE' || type === 'CAMERA') && viewMode !== 'WIREFRAME' && viewMode !== 'FLAT';
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      stencil: false,
+      powerPreference: 'high-performance',
+      preserveDrawingBuffer: false,
+    });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, height);
     renderer.setClearColor(0x1a1a1a, 1);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.0;
-    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.enabled = shouldEnableShadows;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     if (containerRef.current) {
       while (containerRef.current.firstChild) containerRef.current.removeChild(containerRef.current.firstChild);
@@ -1230,12 +1254,12 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       event.preventDefault();
       isContextLostRef.current = true;
       setIsContextLost(true);
-      console.warn('[Viewport] WebGL Context Lost event prevented.');
+      console.warn(`[Viewport ${type}] WebGL Context Lost event prevented.`);
     };
     const handleContextRestored = () => {
       isContextLostRef.current = false;
       setIsContextLost(false);
-      console.info('[Viewport] WebGL Context Restored.');
+      console.info(`[Viewport ${type}] WebGL Context Restored.`);
       if (rendererRef.current && sceneRef.current && cameraRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
@@ -1248,21 +1272,35 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     return () => {
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored);
-      if (rendererRef.current) {
-        rendererRef.current.dispose();
-        rendererRef.current.forceContextLoss();
-        rendererRef.current.domElement.remove();
-        rendererRef.current = null;
-      }
+      controls.removeEventListener('change', updateCamState);
       if (controlsRef.current) {
         controlsRef.current.dispose();
         controlsRef.current = null;
       }
+      if (rendererRef.current) {
+        rendererRef.current.dispose();
+        rendererRef.current.domElement.remove();
+        rendererRef.current = null;
+      }
       if (sceneRef.current) {
         disposeHierarchy(sceneRef.current);
+        groupRef.current.clear();
+        primitivesGroupRef.current.clear();
+        siluetaGroupRef.current.clear();
+        hoverGroupRef.current.clear();
       }
     };
   }, [type, viewCameraId]);
+
+  // ── Dynamic ShadowMap Toggle based on viewMode ────────────────────────────
+  useEffect(() => {
+    if (!rendererRef.current) return;
+    const shouldEnable = (type === 'PERSPECTIVE' || type === 'CAMERA') && viewMode !== 'WIREFRAME' && viewMode !== 'FLAT';
+    if (rendererRef.current.shadowMap.enabled !== shouldEnable) {
+      rendererRef.current.shadowMap.enabled = shouldEnable;
+      rendererRef.current.shadowMap.needsUpdate = true;
+    }
+  }, [type, viewMode]);
 
   // ── 1.4 Lights Rendering ────────────────────────────────────────────────
   const lightsRef = useRef<Map<string, THREE.Object3D>>(new Map());

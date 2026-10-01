@@ -30,10 +30,10 @@ const TEXTURE_PROPERTY_KEYS = [
 ] as const;
 
 /**
- * Safely disposes of a BufferGeometry and its attributes.
+ * Safely disposes of a BufferGeometry and its attributes, unless marked as shared.
  */
 export function disposeGeometry(geometry?: THREE.BufferGeometry | null): void {
-  if (!geometry) return;
+  if (!geometry || geometry.userData?.isShared) return;
   try {
     geometry.dispose();
   } catch (err) {
@@ -42,10 +42,10 @@ export function disposeGeometry(geometry?: THREE.BufferGeometry | null): void {
 }
 
 /**
- * Safely disposes of a Texture (and canvas/image source if applicable).
+ * Safely disposes of a Texture, unless marked as shared.
  */
 export function disposeTexture(texture?: THREE.Texture | null): void {
-  if (!texture) return;
+  if (!texture || texture.userData?.isShared) return;
   try {
     if (typeof texture.dispose === 'function') {
       texture.dispose();
@@ -56,7 +56,7 @@ export function disposeTexture(texture?: THREE.Texture | null): void {
 }
 
 /**
- * Safely disposes of a Material (or array of Materials), including all attached textures and custom shader uniforms.
+ * Safely disposes of a Material (or array of Materials), including all attached non-shared textures and uniforms.
  */
 export function disposeMaterial(material?: THREE.Material | THREE.Material[] | null): void {
   if (!material) return;
@@ -64,13 +64,13 @@ export function disposeMaterial(material?: THREE.Material | THREE.Material[] | n
   const materials = Array.isArray(material) ? material : [material];
 
   materials.forEach((mat) => {
-    if (!mat) return;
+    if (!mat || mat.userData?.isShared) return;
 
     try {
-      // 1. Dispose known texture properties
+      // 1. Dispose known texture properties (skip shared textures)
       const m = mat as any;
       TEXTURE_PROPERTY_KEYS.forEach((key) => {
-        if (m[key] && typeof m[key].dispose === 'function') {
+        if (m[key] && !m[key].userData?.isShared && typeof m[key].dispose === 'function') {
           m[key].dispose();
         }
       });
@@ -78,7 +78,7 @@ export function disposeMaterial(material?: THREE.Material | THREE.Material[] | n
       // 2. Dispose any custom texture properties attached to the material
       Object.keys(m).forEach((k) => {
         const val = m[k];
-        if (val && val.isTexture && typeof val.dispose === 'function') {
+        if (val && val.isTexture && !val.userData?.isShared && typeof val.dispose === 'function') {
           val.dispose();
         }
       });
@@ -86,7 +86,7 @@ export function disposeMaterial(material?: THREE.Material | THREE.Material[] | n
       // 3. Dispose shader uniforms textures if present
       if (m.uniforms) {
         Object.values(m.uniforms).forEach((u: any) => {
-          if (u && u.value) {
+          if (u && u.value && !u.value.userData?.isShared) {
             if (u.value.isTexture && typeof u.value.dispose === 'function') {
               u.value.dispose();
             } else if (u.value.isRenderTarget && typeof u.value.dispose === 'function') {
@@ -122,16 +122,19 @@ export function disposeObject(obj?: THREE.Object3D | null, preserveChildren: boo
     });
   }
 
-  // 2. Dispose Mesh / Line / Points / Sprite resources
+  // 2. Skip disposing if this object is explicitly marked as shared singleton
+  if (obj.userData?.isShared) return;
+
+  // 3. Dispose Mesh / Line / Points / Sprite resources
   const mesh = obj as THREE.Mesh;
-  if (mesh.geometry) {
+  if (mesh.geometry && !mesh.geometry.userData?.isShared) {
     disposeGeometry(mesh.geometry);
   }
   if (mesh.material) {
     disposeMaterial(mesh.material);
   }
 
-  // 3. Dispose special helpers (SkeletonHelper, LightHelper, etc.)
+  // 4. Dispose special helpers (SkeletonHelper, LightHelper, etc.)
   const helper = obj as any;
   if (helper.skeleton) {
     helper.skeleton.dispose?.();
