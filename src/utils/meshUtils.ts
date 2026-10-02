@@ -11,7 +11,7 @@ import { pairTrianglesIntoQuads, type TriangleFace } from './retopology';
  */
 export function repairMesh(
   obj: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
-  tolerance: number = 0.001
+  tolerance?: number
 ): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
   const report: string[] = [];
   if (!obj.vertices || obj.vertices.length === 0) return { vertices: [], faces: [], report: ['Sin vértices'] };
@@ -22,9 +22,22 @@ export function repairMesh(
     return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
   });
 
-  // 1. Weld duplicates with spatial grid search across 3x3x3 neighborhood
+  // 1. Calculate adaptive tolerance if not explicitly provided
+  let effectiveTol = tolerance;
+  if (effectiveTol === undefined || effectiveTol <= 0) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    baseVertices.forEach(v => {
+      minX = Math.min(minX, v[0]); minY = Math.min(minY, v[1]); minZ = Math.min(minZ, v[2]);
+      maxX = Math.max(maxX, v[0]); maxY = Math.max(maxY, v[1]); maxZ = Math.max(maxZ, v[2]);
+    });
+    const diag = Math.sqrt((maxX - minX)**2 + (maxY - minY)**2 + (maxZ - minZ)**2) || 1.0;
+    effectiveTol = Math.max(0.00001, diag * 0.0005); // 0.05% de la diagonal
+  }
+
+  // 2. Weld duplicates with spatial grid search across 3x3x3 neighborhood
   const n = baseVertices.length;
-  const tol = Math.max(0.00001, tolerance);
+  const tol = Math.max(0.00001, effectiveTol);
   const tolSq = tol * tol;
   const cellSize = tol;
 
@@ -80,7 +93,9 @@ export function repairMesh(
     }
   }
 
-  if (mergedCount > 0) report.push(`${mergedCount} vértices fusionados/soldados (distancia <= ${tol})`);
+  if (mergedCount > 0) {
+    report.push(`${mergedCount} vértices soldados (tolerancia: ${tol < 0.001 ? tol.toExponential(2) : tol.toFixed(4)})`);
+  }
 
   // 2. Remap + remove degenerate faces
   let degenerateCount = 0, dupFaceCount = 0;

@@ -2623,7 +2623,16 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
       const isSmooth = obj.smoothShading === true;
 
+      // Group tracking for multi-material rendering
+      let currentMatIdx: number | null = null;
+      let groupStart = 0;
+      let groupCount = 0;
+      const geoGroups: { start: number; count: number; materialIndex: number }[] = [];
+
       meshData.faces?.forEach((face, fIdx) => {
+        const matIdx = face.materialIndex ?? 0;
+        const initialIndicesCount = indices.length;
+
         const faceIndices: number[] = [];
         face.indices.forEach((posIdx, i) => {
           const uv = face.uvs?.[i] || [0, 0];
@@ -2688,7 +2697,25 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             }
           }
         }
+
+        const addedIndices = indices.length - initialIndicesCount;
+        if (addedIndices > 0) {
+          if (currentMatIdx === null || currentMatIdx !== matIdx) {
+            if (groupCount > 0 && currentMatIdx !== null) {
+              geoGroups.push({ start: groupStart, count: groupCount, materialIndex: currentMatIdx });
+            }
+            currentMatIdx = matIdx;
+            groupStart = initialIndicesCount;
+            groupCount = addedIndices;
+          } else {
+            groupCount += addedIndices;
+          }
+        }
       });
+
+      if (groupCount > 0 && currentMatIdx !== null) {
+        geoGroups.push({ start: groupStart, count: groupCount, materialIndex: currentMatIdx });
+      }
 
       let geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPos, 3));
@@ -2698,6 +2725,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         geometry.setAttribute('uv2', uvAttr);
       }
       geometry.setIndex(indices);
+      const hasMultiMatGroups = geoGroups.length > 1 || (geoGroups.length === 1 && geoGroups[0].materialIndex > 0) || (obj.materialIds && Object.keys(obj.materialIds).length > 1);
+      if (hasMultiMatGroups) {
+        geoGroups.forEach(g => geometry.addGroup(g.start, g.count, g.materialIndex));
+      }
       if (isSmooth) {
         computeSmoothNormalsByPosition(geometry, Math.PI / 3);
       } else {
@@ -2767,8 +2798,9 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             ? { ...referencedMaterial, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
             : (obj.material || {})) as any;
 
-          const finalMaterial = isBlueprintActive
-            ? new THREE.MeshStandardMaterial({
+          let finalMaterial: THREE.Material | THREE.Material[];
+          if (isBlueprintActive) {
+            finalMaterial = new THREE.MeshStandardMaterial({
               color: 0x091b33,
               roughness: 0.85,
               metalness: 0.15,
@@ -2777,8 +2809,22 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               polygonOffset: true,
               polygonOffsetFactor: 1,
               polygonOffsetUnits: 1,
-            })
-          : getMaterialForObject(obj, m);
+            });
+          } else if (hasMultiMatGroups) {
+            const maxMatIdx = Math.max(...geoGroups.map(g => g.materialIndex), 0);
+            const matsArray: THREE.Material[] = [];
+            for (let idx = 0; idx <= maxMatIdx; idx++) {
+              const matId = Array.isArray(obj.materialIds)
+                ? obj.materialIds[idx]
+                : (obj.materialIds ? ((obj.materialIds as any)[idx] || (obj.materialIds as any)[String(idx)]) : (idx === 0 ? obj.materialId : undefined));
+              const refMat = matId ? projectMaterials.find(pm => pm.id === matId) : (idx === 0 && referencedMaterial ? referencedMaterial : null);
+              const matInfo = refMat ? { ...refMat } : (idx === 0 ? m : { color: '#cccccc' });
+              matsArray.push(getMaterialForObject(obj, matInfo));
+            }
+            finalMaterial = matsArray;
+          } else {
+            finalMaterial = getMaterialForObject(obj, m);
+          }
 
         const isVol = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || obj.parameters?.isVolumetric || m.isVolumetric || m.volumetric?.enabled;
         const solidMesh = new THREE.Mesh(geometry, finalMaterial);

@@ -549,6 +549,7 @@ export interface CSGObject {
   visible:  boolean;
   keyframes: Keyframe[];
   materialId?: string; // Reference to a project material
+  materialIds?: Record<string | number, string> | string[]; // Multi-material mapping for submeshes / face groups
   material?: Partial<MaterialData>; // Inline overrides
   meshData?: {
     type: 'stl' | 'obj' | 'gltf';

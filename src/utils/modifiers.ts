@@ -805,25 +805,29 @@ export interface ValidationResult {
   degenerateFaces: number;
   openEdges: number;           // Edges shared by only 1 face (non-manifold boundary)
   nonManifoldEdges: number;    // Edges shared by >2 faces
+  inconsistentWindingEdges: number; // Edges where adjacent faces have conflicting normal winding
   issues: string[];
   suggestions: string[];
+  disclaimer: string;
 }
 
 export function validateMesh(obj: CSGObject): ValidationResult {
   const result: ValidationResult = {
     isValid: true,
-    vertexCount: obj.vertices.length,
-    faceCount: obj.faces.length,
+    vertexCount: obj.vertices?.length ?? 0,
+    faceCount: obj.faces?.length ?? 0,
     edgeCount: 0,
     duplicateVertices: 0,
     degenerateFaces: 0,
     openEdges: 0,
     nonManifoldEdges: 0,
+    inconsistentWindingEdges: 0,
     issues: [],
     suggestions: [],
+    disclaimer: 'Diagnóstico topológico básico (manifoldness, duplicados, aristas abiertas y orientación). No certifica ausencia de autointersecciones complejas.',
   };
 
-  if (obj.vertices.length === 0) {
+  if (!obj.vertices || obj.vertices.length === 0) {
     result.isValid = false;
     result.issues.push('Sin vértices');
     return result;
@@ -842,22 +846,38 @@ export function validateMesh(obj: CSGObject): ValidationResult {
     result.suggestions.push('Usar "Reparar" para fusionar vértices duplicados');
   }
 
-  // Edge manifold check
+  // Edge manifold & orientation check
   const edgeFaceCount = new Map<string, number>();
-  for (const face of obj.faces) {
+  const directedEdgeMap = new Map<string, number>(); // Tracks "a->b" vs "b->a" direction
+
+  for (const face of (obj.faces || [])) {
     const n = face.indices.length;
     if (n < 3) { result.degenerateFaces++; continue; }
     for (let i = 0; i < n; i++) {
       const a = face.indices[i], b = face.indices[(i+1)%n];
       const key = a < b ? `${a}:${b}` : `${b}:${a}`;
       edgeFaceCount.set(key, (edgeFaceCount.get(key) ?? 0) + 1);
+
+      const dirKey = `${a}->${b}`;
+      directedEdgeMap.set(dirKey, (directedEdgeMap.get(dirKey) ?? 0) + 1);
     }
   }
   result.edgeCount = edgeFaceCount.size;
 
-  for (const [, count] of edgeFaceCount) {
-    if (count === 1) result.openEdges++;
-    else if (count > 2) result.nonManifoldEdges++;
+  for (const [key, count] of edgeFaceCount) {
+    if (count === 1) {
+      result.openEdges++;
+    } else if (count > 2) {
+      result.nonManifoldEdges++;
+    } else if (count === 2) {
+      // Manifold edge shared by exactly 2 faces: check winding direction
+      const [vA, vB] = key.split(':').map(Number);
+      const fwd = directedEdgeMap.get(`${vA}->${vB}`) ?? 0;
+      const rev = directedEdgeMap.get(`${vB}->${vA}`) ?? 0;
+      if (fwd === 2 || rev === 2) {
+        result.inconsistentWindingEdges++;
+      }
+    }
   }
 
   if (result.degenerateFaces > 0) {
@@ -868,12 +888,17 @@ export function validateMesh(obj: CSGObject): ValidationResult {
   if (result.openEdges > 0) {
     result.isValid = false;
     result.issues.push(`${result.openEdges} aristas abiertas (malla no cerrada)`);
-    result.suggestions.push('La malla tiene huecos — revisar antes de imprimir en 3D');
+    result.suggestions.push('La malla tiene huecos — usar "Tapar Huecos" antes de operaciones booleanas');
   }
   if (result.nonManifoldEdges > 0) {
     result.isValid = false;
     result.issues.push(`${result.nonManifoldEdges} aristas no-manifold (>2 caras)`);
     result.suggestions.push('Usar "Reparar" para limpiar geometría no-manifold');
+  }
+  if (result.inconsistentWindingEdges > 0) {
+    result.isValid = false;
+    result.issues.push(`${result.inconsistentWindingEdges} aristas con orientación invertida de normales`);
+    result.suggestions.push('Recalcular o invertir normales para asegurar coherencia exterior');
   }
 
   return result;

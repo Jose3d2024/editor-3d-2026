@@ -48,38 +48,45 @@ export async function executeExtrudeManifold(
     return { success: false, message: 'Selecciona al menos una cara para la extrusión Manifold.' };
   }
 
+  // Caso límite: distancia cero
+  if (Math.abs(distance) < 1e-6) {
+    return {
+      success: true,
+      message: 'Extrusión con distancia cero: sin cambios en la geometría.',
+      newObj: obj,
+    };
+  }
+
   try {
-    // 1. Calculate the average normal of selected faces in local space
-    let avgNormal: V3 = [0, 0, 0];
-    const selectedFaceData: Array<{ indices: number[]; points: V3[] }> = [];
+    // 1. Gather selected face data and individual normals
+    const selectedFaceData: Array<{ indices: number[]; points: V3[]; normal: V3 }> = [];
 
     faceIndices.forEach(fIdx => {
       const face = obj.faces[fIdx];
-      if (!face) return;
+      if (!face || !face.indices || face.indices.length < 3) return;
       const pts: V3[] = face.indices.map(vIdx => {
         const base = obj.vertices[vIdx];
+        if (!base) return [0, 0, 0] as V3;
         const off = obj.vertexOffsets?.[vIdx] ?? [0, 0, 0];
         return [base[0] + off[0], base[1] + off[1], base[2] + off[2]] as V3;
       });
-      selectedFaceData.push({ indices: face.indices, points: pts });
 
       if (pts.length >= 3) {
         const n = computePolygonNormal(pts);
-        avgNormal[0] += n[0];
-        avgNormal[1] += n[1];
-        avgNormal[2] += n[2];
+        selectedFaceData.push({ indices: face.indices, points: pts, normal: n });
       }
     });
 
-    const mag = Math.hypot(avgNormal[0], avgNormal[1], avgNormal[2]) || 1;
-    avgNormal = [avgNormal[0] / mag, avgNormal[1] / mag, avgNormal[2] / mag];
+    if (selectedFaceData.length === 0) {
+      return { success: false, message: 'Las caras seleccionadas no tienen geometría válida.' };
+    }
 
     // 2. Prepare the base mesh for solid CSG/Manifold operations
     const { mesh: baseMesh } = await prepareMeshForCSG(obj);
     const baseCSG = CSG.fromMesh(baseMesh);
 
     // 3. Build the extrusion volume tool from selected faces
-    // We create a solid prism for each selected face (or group of faces)
+    // We create a solid prism for each selected face adapted to its local normal
     const toolGeometries: THREE.BufferGeometry[] = [];
 
     selectedFaceData.forEach(item => {
@@ -87,14 +94,14 @@ export async function executeExtrudeManifold(
       const k = poly.length;
       if (k < 3) return;
 
+      const norm = item.normal;
       const extrusionVec = new THREE.Vector3(
-        avgNormal[0] * distance,
-        avgNormal[1] * distance,
-        avgNormal[2] * distance
+        norm[0] * distance,
+        norm[1] * distance,
+        norm[2] * distance
       );
 
       // Create bottom and top polygon points
-      // In local coordinates relative to the object's transform
       const bottomPoints: THREE.Vector3[] = poly.map(p => new THREE.Vector3(p[0], p[1], p[2]));
       const topPoints: THREE.Vector3[] = bottomPoints.map(p => p.clone().add(extrusionVec));
 

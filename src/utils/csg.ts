@@ -61,9 +61,17 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
 
     const isSmooth = obj.smoothShading === true;
 
+    let currentMatIdx: number | null = null;
+    let groupStart = 0;
+    let groupCount = 0;
+    const geoGroups: { start: number; count: number; materialIndex: number }[] = [];
+
     meshData.faces.forEach((face, fIdx) => {
       const faceIndices: number[] = [];
       const rawIndices = face.indices || ((face as any).a !== undefined ? [(face as any).a, (face as any).b, (face as any).c] : []);
+      const matIdx = face.materialIndex ?? 0;
+      const initialIndicesCount = indices.length;
+
       rawIndices.forEach((posIdx, i) => {
         const uv = face.uvs?.[i] || [0, 0];
         const key = isSmooth
@@ -88,13 +96,34 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
       for (let i = 1; i < faceIndices.length - 1; i++) {
         indices.push(faceIndices[0], faceIndices[i], faceIndices[i+1]);
       }
+
+      const addedIndices = indices.length - initialIndicesCount;
+      if (addedIndices > 0) {
+        if (currentMatIdx === null || currentMatIdx !== matIdx) {
+          if (groupCount > 0 && currentMatIdx !== null) {
+            geoGroups.push({ start: groupStart, count: groupCount, materialIndex: currentMatIdx });
+          }
+          currentMatIdx = matIdx;
+          groupStart = initialIndicesCount;
+          groupCount = addedIndices;
+        } else {
+          groupCount += addedIndices;
+        }
+      }
     });
+
+    if (groupCount > 0 && currentMatIdx !== null) {
+      geoGroups.push({ start: groupStart, count: groupCount, materialIndex: currentMatIdx });
+    }
 
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPositions, 3));
     const uvAttr = new THREE.Float32BufferAttribute(finalUvs, 2);
     geometry.setAttribute('uv', uvAttr);
     geometry.setAttribute('uv2', uvAttr);
     geometry.setIndex(indices);
+    if (geoGroups.length > 1 || (geoGroups.length === 1 && geoGroups[0].materialIndex > 0)) {
+      geoGroups.forEach(g => geometry.addGroup(g.start, g.count, g.materialIndex));
+    }
     if (isSmooth) {
       computeSmoothNormalsByPosition(geometry, Math.PI / 3);
     } else {
