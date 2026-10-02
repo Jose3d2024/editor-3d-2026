@@ -1,5 +1,5 @@
 import type { CSGObject, MeshFace, V3 } from '../types';
-import { optimizeMesh } from './modifiers';
+import { simplifyMesh } from './modifiers_advanced';
 
 export interface OptimizationWorkerRequest {
   id: number;
@@ -15,11 +15,11 @@ export interface OptimizationWorkerResponse {
   error?: string;
 }
 
-self.onmessage = (event: MessageEvent<OptimizationWorkerRequest>) => {
+self.onmessage = async (event: MessageEvent<OptimizationWorkerRequest>) => {
   const { id, object, ratio } = event.data;
 
   try {
-    const result = optimizeMesh(object, ratio);
+    const result = await simplifyMesh(object, ratio);
     const response: OptimizationWorkerResponse = {
       id,
       ok: true,
