@@ -4,46 +4,44 @@ Fecha: 2026-10-02
 
 ## Diagnóstico
 
-La ruta actual de optimización ejecuta `optimizeMesh(...)` directamente desde el estado de Zustand. La implementación de `optimizeMesh` convierte la malla a `BufferGeometry`, ejecuta `BufferGeometryUtils.mergeVertices(...)` y después `SimplifyModifier.modify(...)`. Estas operaciones son síncronas y pueden consumir mucho tiempo con mallas grandes. Además, el flujo recalcula normales con `computeVertexNormals()` y convierte de nuevo la geometría a `{ vertices, faces }`.
+La ruta actual de `optimizeObject()` en `src/store/useStore.ts` no utiliza `optimizeMesh()` como se había asumido inicialmente. Para objetos nativos llama a `simplifyMesh()` de `src/utils/modifiers_advanced.ts`; para modelos GLTF/GLB llama a `optimizeGLBModel()`.
 
-Referencias revisadas:
-- `src/store/useStore.ts`: la optimización llama directamente a `optimizeMesh(...)`.
-- `src/utils/modifiers.ts`: `optimizeMesh()` usa `mergeVertices`, `SimplifyModifier.modify` y `computeVertexNormals`.
+La ruta nativa de `simplifyMesh()` construye arrays completos de índices/posiciones, espera la inicialización de Meshopt y realiza varios intentos síncronos de `Meshopt.simplify()` / `Meshopt.simplifyWithAttributes()`. Con una malla grande todo ese trabajo ocurre en el hilo principal si se invoca desde Zustand/UI.
 
-## Cambio realizado
+La ruta GLTF/GLB es todavía más pesada: usa glTF-Transform, `weld()`, Meshopt y, para modelos no animados, reorder + Draco + escritura del GLB. Esa ruta también necesita tratamiento separado y no se debe mezclar con el Worker nativo sin comprobar compatibilidad de sus dependencias WASM.
 
-Se añadió:
+## Cambios realizados
 
-`src/utils/optimizationWorker.ts`
+### 1. `src/utils/optimizationWorker.ts`
 
-Este Worker encapsula la ejecución pesada de `optimizeMesh()` fuera del hilo principal.
+El Worker se corrigió para utilizar la función real que emplea el botón Optimizar para mallas nativas: `simplifyMesh(object, ratio)`.
 
-## Importante
+La primera versión utilizaba `optimizeMesh()`, que no era la ruta real del botón.
 
-El Worker está añadido de forma aislada para no alterar todavía el comportamiento del editor sin una prueba. El siguiente paso es conectar la llamada de `useStore.ts` a este Worker y añadir:
+### 2. `src/utils/optimizationWorkerClient.ts`
 
-1. progreso real por fases;
-2. cancelación;
-3. protección para mallas extremadamente grandes;
-4. aplicación del resultado una sola vez al finalizar;
-5. fallback controlado si Worker no está disponible;
-6. comprobación de que Undo/Redo conserva el estado anterior.
+Se añadió un cliente que crea un Worker de módulo, asigna un ID único, devuelve una Promise con `vertices` y `faces`, termina el Worker al finalizar, propaga errores y limita el ratio a `0.01–0.99`.
 
-## Por qué no se hizo un cambio mayor automáticamente
+## Estado actual
 
-`useStore.ts` contiene una parte importante de la lógica de edición y la llamada actual está integrada con el estado `meshProcessing`. Cambiar toda la ruta de una sola vez sin ejecutar el build/pruebas podría introducir regresiones. Por eso primero se aisló el trabajo pesado en un Worker.
+El Worker y su cliente ya están preparados, pero todavía no se ha conectado `optimizeObject()` de `useStore.ts` al cliente. No se marca como completado porque esa conexión debe mantener correctamente `meshProcessing`, `saveHistory()`, Undo/Redo y la rama GLTF/GLB.
 
-## Estado
+## Próximo cambio
 
-- [x] Identificada la operación síncrona pesada.
-- [x] Worker creado.
-- [ ] Conectar Worker con `useStore.ts`.
-- [ ] Añadir cancelación.
-- [ ] Añadir progreso por fases.
-- [ ] Ejecutar `npm run lint`.
-- [ ] Ejecutar `npm run build`.
-- [ ] Probar con cubo, malla media y malla pesada.
+Modificar únicamente la rama de malla nativa de `optimizeObject()` para utilizar `optimizeMeshInWorker(updatedObj, ratio)`, manteniendo en el hilo principal solo la preparación mínima, recepción del resultado, una actualización de `project.objects`, `saveHistory()` y el estado final de `meshProcessing`.
+
+Después se estudiará por separado `optimizeGLBModel()` antes de mover esa ruta a Worker.
+
+## Seguridad prevista
+
+- No permitir dos optimizaciones simultáneas del mismo objeto.
+- No reemplazar la geometría si el Worker devuelve datos vacíos o inválidos.
+- Mantener el objeto original si falla el Worker.
+- Mantener Undo/Redo creando el historial únicamente después de recibir un resultado válido.
+- Añadir cancelación explícita en el siguiente paso.
 
 ## Commits
 
 - `954d19ab6f957d721bc826bff12106ef576493ea` — `perf: add isolated mesh optimization worker`
+- `bbb9899511783d180d3278197a495fd011bee83d` — `fix: worker uses actual mesh simplifier`
+- `0baed77fc42edbe06f65bdceeeed4059565474bd` — `feat: add optimization worker client`
