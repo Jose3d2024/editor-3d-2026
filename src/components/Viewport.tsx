@@ -968,12 +968,13 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     camera.add(editorHeadlight);
     scene.add(camera);
 
+    const isWindows = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '');
     const shouldEnableShadows = (type === 'PERSPECTIVE' || type === 'CAMERA') && viewMode !== 'WIREFRAME';
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: false,
       stencil: false,
-      powerPreference: 'high-performance',
+      ...(isWindows ? {} : { powerPreference: 'high-performance' }),
       preserveDrawingBuffer: false,
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

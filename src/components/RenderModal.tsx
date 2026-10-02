@@ -412,12 +412,13 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       w = 1080; h = 1920;
     }
 
+    const isWindows = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '');
     // ── Renderer de alta definición con ToneMapping ───────────────────────
     const renderer = new THREE.WebGLRenderer({
       canvas: canvasRef.current,
       antialias: true,
       preserveDrawingBuffer: true,
-      powerPreference: 'high-performance',
+      ...(isWindows ? {} : { powerPreference: 'high-performance' }),
     });
     renderer.setSize(w, h, false);
     renderer.setPixelRatio(1);
@@ -871,11 +872,12 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     else if (resolution === 'square') { w = 1080; h = 1080; }
     else if (resolution === 'vertical') { w = 1080; h = 1920; }
 
+    const isWindows = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '');
     const renderer = new THREE.WebGLRenderer({
       canvas: canvasRef.current,
       antialias: true,
       preserveDrawingBuffer: true,
-      powerPreference: 'high-performance',
+      ...(isWindows ? {} : { powerPreference: 'high-performance' }),
     });
     renderer.setSize(w, h, false);
     renderer.setPixelRatio(1);

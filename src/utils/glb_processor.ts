@@ -189,7 +189,10 @@ export async function optimizeGLBModel(
   try {
     if (onProgress) await onProgress(10, 'Cargando modelo GLB, texturas y animaciones...');
 
-    if ((Meshopt as any).ready) await (Meshopt as any).ready;
+    await Promise.allSettled([
+      (Meshopt as any).ready,
+      (MeshoptDecoder as any).ready,
+    ]);
 
     const loader = new GLTFLoader();
     const dracoLoader = new DRACOLoader();
@@ -197,37 +200,58 @@ export async function optimizeGLBModel(
     loader.setDRACOLoader(dracoLoader);
     loader.setMeshoptDecoder(MeshoptDecoder);
 
-    const gltf = await new Promise<any>((resolve, reject) =>
-      loader.load(obj.meshData!.data, resolve, undefined, reject)
-    );
+    let gltf: any;
+    try {
+      if (typeof obj.meshData!.data === 'string' && (obj.meshData!.data.startsWith('data:') || obj.meshData!.data.startsWith('blob:'))) {
+        const resp = await fetch(obj.meshData!.data);
+        const arrayBuf = await resp.arrayBuffer();
+        gltf = await new Promise<any>((resolve, reject) =>
+          loader.parse(arrayBuf, '', resolve, reject)
+        );
+      } else {
+        gltf = await new Promise<any>((resolve, reject) =>
+          loader.load(obj.meshData!.data, resolve, undefined, reject)
+        );
+      }
+    } catch (loadErr) {
+      console.warn('Fallo en parseo binario, intentando loader.load estándar:', loadErr);
+      gltf = await new Promise<any>((resolve, reject) =>
+        loader.load(obj.meshData!.data, resolve, undefined, reject)
+      );
+    }
 
     const scene = gltf.scene;
-    let totalMeshes = 0;
+    const meshList: THREE.Mesh[] = [];
     scene.traverse((child: any) => {
-      if (child.isMesh) totalMeshes++;
+      if (child.isMesh) meshList.push(child);
     });
 
-    if (onProgress) await onProgress(20, `Optimizando ${totalMeshes} sub-mallas conservando texturas y movimiento...`);
+    const totalMeshes = meshList.length;
+    if (onProgress) await onProgress(20, `Analizando ${totalMeshes} sub-mallas conservando texturas y movimiento...`);
+    await new Promise(r => setTimeout(r, 10));
 
     const clampedRes = Math.max(1, Math.min(12, resolutionLevel));
     // Escalar nivel de resolución o utilizar el ratio directo si se suministra
     const targetRatio = options?.ratio !== undefined
       ? Math.min(0.98, Math.max(0.01, options.ratio))
       : Math.min(0.85, Math.max(0.02, Math.pow((clampedRes - 0.5) / 11.5, 1.4) * 0.83 + 0.02));
-    const targetError = Math.max(0.01, 0.95 - (clampedRes / 12) * 0.90);
     const preserveCreases = options?.preserveCreases !== false;
 
-    let meshIdxCounter = 0;
-    scene.traverse((child: any) => {
-      if (child.isMesh) {
-        const meshId = `mesh-${meshIdxCounter++}`;
-        if (targetMeshIds && targetMeshIds.length > 0 && !targetMeshIds.includes(meshId)) {
-          return; // Omitir sub-malla no seleccionada (se mantiene 100% intacta)
-        }
+    for (let mIdx = 0; mIdx < meshList.length; mIdx++) {
+      const mesh = meshList[mIdx];
+      const meshId = `mesh-${mIdx}`;
+      if (targetMeshIds && targetMeshIds.length > 0 && !targetMeshIds.includes(meshId)) {
+        continue; // Omitir sub-malla no seleccionada (se mantiene 100% intacta)
+      }
 
-        const mesh = child as THREE.Mesh;
-        let geometry = mesh.geometry;
-        if (!geometry || !geometry.attributes.position) return;
+      let geometry = mesh.geometry;
+      if (!geometry || !geometry.attributes.position) continue;
+
+      const currentProgress = 20 + Math.round(((mIdx + 1) / Math.max(1, meshList.length)) * 50);
+      if (onProgress) {
+        await onProgress(currentProgress, `Optimizando sub-malla ${mIdx + 1}/${meshList.length}...`);
+      }
+      await new Promise(r => setTimeout(r, 0)); // Ceder control al bucle de eventos para mantener la UI fluida
 
         // Solo si la geometría no tiene índices, indexarla
         if (!geometry.index) {
@@ -270,7 +294,7 @@ export async function optimizeGLBModel(
         // preservarla íntegra para no colapsarla ni hacerla desaparecer.
         const minTrisSafety = options?.isCurved ? 24 : 12;
         if (initialTris <= minTrisSafety && (!targetMeshIds || targetMeshIds.length === 0)) {
-          return; // Mantener partes pequeñas intactas en decimation masiva
+          continue; // Mantener partes pequeñas intactas en decimation masiva
         }
 
         if (initialTris > 6) {
@@ -488,7 +512,6 @@ export async function optimizeGLBModel(
           }
         }
       }
-    });
 
     if (onProgress) await onProgress(75, 'Empaquetando modelo GLB con materiales y animaciones...');
     await new Promise(r => setTimeout(r, 20));

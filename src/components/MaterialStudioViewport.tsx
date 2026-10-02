@@ -577,11 +577,12 @@ export const MaterialStudioViewport: React.FC = () => {
     const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
     camera.position.set(0, 0.6, 4.2);
 
+    const isWindows = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '');
     const renderer = new THREE.WebGLRenderer({
       canvas: canvasRef.current,
       antialias: true,
       alpha: true,
-      powerPreference: 'high-performance',
+      ...(isWindows ? {} : { powerPreference: 'high-performance' }),
     });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

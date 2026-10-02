@@ -503,7 +503,8 @@ export const UVMappingStudio: React.FC<UVMappingStudioProps> = ({
     camera.position.set(2.2, 1.6, 2.8);
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    const isWindows = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '');
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, ...(isWindows ? {} : { powerPreference: 'high-performance' }) });
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
