@@ -17,7 +17,6 @@ export interface OptimizationWorkerResponse {
 
 self.onmessage = async (event: MessageEvent<OptimizationWorkerRequest>) => {
   const { id, object, ratio } = event.data;
-
   try {
     const result = await simplifyMesh(object, ratio);
     const response: OptimizationWorkerResponse = {

@@ -7,6 +7,7 @@ import { createBaseGeometry } from '../utils/csg';
 import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces, fromThreeGeometry } from '../utils/modifiers';
 import { bevelMeshAdvanced } from '../utils/bevel';
 import { simplifyMesh, convertImportedToCSG, shapeToProfile, revolveMesh } from '../utils/modifiers_advanced';
+import { optimizeMeshInWorker } from '../utils/optimizationWorkerClient';
 import { applyNoiseToMesh, type NoiseDeformConfig } from '../utils/meshNoise';
 import { executeUnifiedBoolean, BooleanExecuteOptions, BooleanResult, UnifiedBooleanOp } from '../utils/booleanOperations';
 import { getDefaultMaterials } from '../utils/defaultMaterials';
@@ -1659,13 +1660,27 @@ export const useStore = create<Store>()((set, get) => ({
 
     const effectiveShapeType = (type === 'smooth' || type === 'freehand') ? 'bezier' : type;
 
+    // Compute centroid of the drawn vertices in world space to set the object pivot accurately
+    const centroid = new THREE.Vector3();
+    if (finalVerts.length > 0) {
+      finalVerts.forEach(v => centroid.add(new THREE.Vector3(v[0], v[1], v[2])));
+      centroid.divideScalar(finalVerts.length);
+    }
+
+    // Store vertices in local space relative to the object's centroid position
+    const localVerts = finalVerts.map(v => [
+      v[0] - centroid.x,
+      v[1] - centroid.y,
+      v[2] - centroid.z,
+    ] as V3);
+
     const newObj: CSGObject = {
       id: genId(),
       name: `${type === 'smooth' ? 'Curva Suave' : type === 'freehand' ? 'Trazo Libre' : type === 'bezier' ? 'Curva Bézier' : 'Forma'} ${state.project.objects.length + 1}`,
       type: 'SHAPE', operation: 'ADD',
-      transform: { position:[0,0,0], rotation:[0,0,0], scale:[1,1,1] },
+      transform: { position: [centroid.x, centroid.y, centroid.z], rotation: [0, 0, 0], scale: [1, 1, 1] },
       parameters: { shapeType: effectiveShapeType, closed, segments: 24 },
-      vertices: finalVerts, bezierHandles: finalHandles, faces: [],
+      vertices: localVerts, bezierHandles: finalHandles, faces: [],
       color: state.drawColor, smoothShading: false, opacity: 1, visible: true, keyframes: [],
     };
     set({
@@ -1679,9 +1694,13 @@ export const useStore = create<Store>()((set, get) => ({
   // ── addShapeVertices: extend existing shape with new points ───────────────
   addShapeVertices: (id, newVerts, newHandles) => {
     const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+    const pos = obj.transform?.position || [0, 0, 0];
+    const localNewVerts = newVerts.map(v => [v[0] - pos[0], v[1] - pos[1], v[2] - pos[2]] as V3);
     set({ project: { ...project, objects: project.objects.map(o => {
       if (o.id !== id) return o;
-      const updatedVerts   = [...o.vertices,       ...newVerts];
+      const updatedVerts   = [...o.vertices,       ...localNewVerts];
       const updatedHandles = [...(o.bezierHandles ?? []), ...newHandles];
       const smoothed = o.parameters.shapeType === 'bezier'
         ? autoSmoothBezierHandles(updatedVerts, updatedHandles, o.parameters.closed ?? false)
@@ -2915,13 +2934,25 @@ export const useStore = create<Store>()((set, get) => ({
           );
         } else {
           updatedObj = await convertImportedToCSG(obj);
-          const result = await simplifyMesh(updatedObj, ratio);
+          let result;
+          try {
+            result = await optimizeMeshInWorker(updatedObj, ratio);
+          } catch (workerErr) {
+            console.warn('Worker optimization failed, falling back to direct simplification:', workerErr);
+            result = await simplifyMesh(updatedObj, ratio);
+          }
           if (result && result.vertices && result.vertices.length > 0 && result.faces && result.faces.length > 0) {
             updatedObj = { ...updatedObj, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } };
           }
         }
       } else {
-        const result = await simplifyMesh(obj, ratio);
+        let result;
+        try {
+          result = await optimizeMeshInWorker(obj, ratio);
+        } catch (workerErr) {
+          console.warn('Worker optimization failed, falling back to direct simplification:', workerErr);
+          result = await simplifyMesh(obj, ratio);
+        }
         if (result && result.vertices && result.vertices.length > 0 && result.faces && result.faces.length > 0) {
           updatedObj = { ...obj, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } };
         }
@@ -5095,8 +5126,12 @@ export const useStore = create<Store>()((set, get) => ({
     const obj = project.objects.find(o => o.id === id);
     if (!obj || !obj.vertices) return { success: false, message: 'Objeto no encontrado.' };
 
-    const sel = vertexIndices && vertexIndices.length >= 2 ? vertexIndices : selectedVertexIndices;
-    if (sel.length < 2) return { success: false, message: 'Selecciona al menos 2 vértices.' };
+    const rawSel = vertexIndices && vertexIndices.length >= 2
+      ? vertexIndices
+      : (selectedVertexIndices.length >= 2 ? selectedVertexIndices : (obj.vertices && obj.vertices.length >= 3 ? obj.vertices.map((_, i) => i) : []));
+    // Eliminar duplicados en la selección
+    const sel = Array.from(new Set(rawSel));
+    if (sel.length < 2) return { success: false, message: 'Selecciona al menos 2 vértices distintos.' };
 
     if (sel.length === 2) {
       return get().connectVertices(id, sel);
@@ -5110,12 +5145,91 @@ export const useStore = create<Store>()((set, get) => ({
     });
     newObj.vertexOffsets = {};
     delete newObj.wireframeEdges;
-    newObj.parameters = {};
+    newObj.parameters = { ...newObj.parameters, shapeType: undefined };
+    newObj.faces = newObj.faces || [];
 
-    newObj.faces.push({ indices: [...sel] });
+    // 1. Calcular centroide de los vértices seleccionados
+    const centroid = new THREE.Vector3();
+    sel.forEach(idx => {
+      const v = newObj.vertices[idx];
+      if (v) centroid.add(new THREE.Vector3(v[0], v[1], v[2]));
+    });
+    centroid.divideScalar(sel.length);
+
+    // 2. Calcular la normal del plano óptimo (Newell's Normal / Best-fit plane)
+    let normal = new THREE.Vector3();
+    for (let i = 0; i < sel.length; i++) {
+      const currIdx = sel[i];
+      const nextIdx = sel[(i + 1) % sel.length];
+      const c = newObj.vertices[currIdx];
+      const n = newObj.vertices[nextIdx];
+      if (c && n) {
+        normal.x += (c[1] - n[1]) * (c[2] + n[2]);
+        normal.y += (c[2] - n[2]) * (c[0] + n[0]);
+        normal.z += (c[0] - n[0]) * (c[1] + n[1]);
+      }
+    }
+
+    if (normal.lengthSq() < 1e-6 && sel.length >= 3) {
+      // Fallback si los vértices se seleccionaron en orden no cíclico
+      const v0 = new THREE.Vector3(...newObj.vertices[sel[0]]);
+      const v1 = new THREE.Vector3(...newObj.vertices[sel[1]]);
+      const v2 = new THREE.Vector3(...newObj.vertices[sel[2]]);
+      normal = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
+    }
+
+    if (normal.lengthSq() > 1e-6) {
+      normal.normalize();
+    } else {
+      normal.set(0, 1, 0);
+    }
+
+    // 3. Proyección coplanar automática para eliminar distorsiones y sombreados extraños
+    // Ajusta sutilmente los vértices al plano promedio del centroide
+    let adjustedCount = 0;
+    sel.forEach(idx => {
+      const v = newObj.vertices[idx];
+      if (!v) return;
+      const pt = new THREE.Vector3(v[0], v[1], v[2]);
+      const distToPlane = pt.clone().sub(centroid).dot(normal);
+      if (Math.abs(distToPlane) > 1e-4) {
+        pt.sub(normal.clone().multiplyScalar(distToPlane));
+        newObj.vertices[idx] = [pt.x, pt.y, pt.z];
+        adjustedCount++;
+      }
+    });
+
+    // 4. Ordenamiento angular cíclico respecto al centroide (evita polígonos cruzados o forma de mariposa)
+    let sortedIndices = [...sel];
+    if (sel.length >= 4) {
+      // Crear base ortonormal en el plano
+      const uAxis = new THREE.Vector3();
+      if (Math.abs(normal.x) < 0.9 && Math.abs(normal.y) < 0.9) {
+        uAxis.set(0, 0, 1).cross(normal).normalize();
+      } else {
+        uAxis.set(1, 0, 0).cross(normal).normalize();
+      }
+      const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+
+      const angles = sel.map(idx => {
+        const v = newObj.vertices[idx];
+        const vec = new THREE.Vector3(v[0], v[1], v[2]).sub(centroid);
+        const x = vec.dot(uAxis);
+        const y = vec.dot(vAxis);
+        return { idx, angle: Math.atan2(y, x) };
+      });
+
+      angles.sort((a, b) => a.angle - b.angle);
+      sortedIndices = angles.map(a => a.idx);
+    }
+
+    newObj.faces.push({ indices: sortedIndices });
     get().updateObject(id, newObj);
     get().saveHistory();
-    return { success: true, message: `Cara creada con ${sel.length} vértices.` };
+
+    const tipoCara = sortedIndices.length === 3 ? 'Triángulo (Tri)' : sortedIndices.length === 4 ? 'Cuadrilátero (Quad)' : `Polígono de ${sortedIndices.length} lados (N-gon)`;
+    const coplanarNote = adjustedCount > 0 ? ' con optimización coplanar aplicada' : ' perfectamente plano';
+    return { success: true, message: `Cara ${tipoCara} generada exitosamente${coplanarNote}.` };
   },
 
   extrudeSelectedVertices: (id: string, vertexIndices?: number[], offset?: V3) => {
@@ -7134,13 +7248,42 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   capSelectedFacesObject: async (id) => {
-    const { project, selectedFaceIndices } = get();
+    const { project, selectedFaceIndices, selectedVertexIndices } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
     if (obj.meshData) obj = await convertImportedToCSG(obj);
-    const result = capSelectedFaces(obj, selectedFaceIndices);
-    set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
-    get().saveHistory();
+
+    // Si el objeto no tiene caras (ej. una forma de 4 vértices) o la selección de caras está vacía
+    if (!obj.faces || obj.faces.length === 0 || selectedFaceIndices.length === 0) {
+      if (selectedVertexIndices && selectedVertexIndices.length >= 3) {
+        get().createFaceFromVertices(id, selectedVertexIndices);
+        return;
+      }
+      if (obj.vertices && obj.vertices.length >= 3) {
+        get().createFaceFromVertices(id, obj.vertices.map((_, i) => i));
+        return;
+      }
+    }
+
+    const result = capSelectedFaces(obj, selectedFaceIndices.length > 0 ? selectedFaceIndices : obj.faces.map((_, i) => i));
+    if (result && result.faces && result.faces.length > (obj.faces?.length ?? 0)) {
+      set({
+        project: {
+          ...get().project,
+          objects: get().project.objects.map(o => o.id === id ? {
+            ...o,
+            type: 'MESH',
+            meshData: undefined,
+            vertices: result.vertices,
+            faces: result.faces,
+            vertexOffsets: {}
+          } : o)
+        }
+      });
+      get().saveHistory();
+    } else if (obj.vertices && obj.vertices.length >= 3) {
+      get().createFaceFromVertices(id, obj.vertices.map((_, i) => i));
+    }
   },
 
   alignToGrid: (id) => {

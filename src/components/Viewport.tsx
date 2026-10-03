@@ -259,6 +259,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   const isDraggingRef = useRef(false);
 
   const drawingPointsRef = useRef<THREE.Vector3[]>([]);
+  // Plano de trabajo bloqueado durante un trazo (evita que los puntos se desplacen al centro)
+  const drawPlaneRef = useRef<THREE.Plane | null>(null);
   const drawingHandlesRef = useRef<BezierHandle[]>([]);
   const drawingObjectIdRef = useRef<string | null>(null);
   const drawingMeshRef = useRef<THREE.Object3D | null>(null);
@@ -366,6 +368,51 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   useEffect(() => { siluetaRef.current = silueta; }, [silueta]);
 
   // ── Helpers ──────────────────────────────────────────────────────────────
+  // Raycast a las mallas de la escena (no SHAPE) para obtener punto + normal de cara
+  const pickSurfaceUnderRay = (raycaster: THREE.Raycaster) => {
+    const roots: THREE.Object3D[] = [];
+    const objs = projectRef.current.objects;
+    meshesRef.current.forEach((o3d, id) => {
+      const po = objs.find(o => o.id === id);
+      if (!po || po.visible === false || po.type === 'SHAPE') return;
+      roots.push(o3d);
+    });
+    if (roots.length === 0) return null;
+    const hit = raycaster.intersectObjects(roots, true)
+      .find(h => (h.object as any).isMesh && h.object.visible && h.face);
+    if (!hit || !hit.face) return null;
+    const normal = hit.face.normal.clone()
+      .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld))
+      .normalize();
+    if (normal.dot(raycaster.ray.direction) > 0) normal.negate();
+    return { point: hit.point.clone(), normal };
+  };
+
+  // Plano de trabajo a partir de los puntos de una forma existente (fórmula de Newell)
+  const lockDrawPlaneFromPoints = (pts: THREE.Vector3[]) => {
+    const n = new THREE.Vector3();
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      n.x += (a.y - b.y) * (a.z + b.z);
+      n.y += (a.z - b.z) * (a.x + b.x);
+      n.z += (a.x - b.x) * (a.y + b.y);
+    }
+    if (n.lengthSq() < 1e-10) {
+      // Colineal: conservar la normal del plano actual o la de la vista
+      n.copy(drawPlaneRef.current?.normal ??
+        ((type === 'FRONT' || type === 'BACK') ? new THREE.Vector3(0, 0, 1) :
+         (type === 'LEFT' || type === 'RIGHT') ? new THREE.Vector3(1, 0, 0) :
+                                                 new THREE.Vector3(0, 1, 0)));
+    }
+    drawPlaneRef.current = new THREE.Plane().setFromNormalAndCoplanarPoint(n.normalize(), pts[0]);
+  };
+
+  const getShapeMatrix = (obj: any) => new THREE.Matrix4().compose(
+    new THREE.Vector3().fromArray(obj.transform.position),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(obj.transform.rotation)),
+    new THREE.Vector3().fromArray(obj.transform.scale),
+  );
+
   const getPoint = (e: PointerEvent | MouseEvent, skipSnap = false) => {
     if (!rendererRef.current || !cameraRef.current) return null;
     const canvas = rendererRef.current.domElement;
@@ -381,8 +428,34 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       (type === 'FRONT' || type === 'BACK') ? new THREE.Vector3(0, 0, 1) :
       (type === 'LEFT' || type === 'RIGHT') ? new THREE.Vector3(1, 0, 0) :
                                               new THREE.Vector3(0, 1, 0);
-    const plane = new THREE.Plane(drawPlaneNormal, 0);
+    let plane = new THREE.Plane(drawPlaneNormal, 0);
     const target = new THREE.Vector3();
+
+    // ── Plano de dibujo consciente de la superficie ──────────────────────
+    // Antes el plano pasaba SIEMPRE por el origen, por lo que al dibujar sobre la
+    // cara superior de un cubo (y = h) el punto caía en y = 0 (dentro del objeto y
+    // desplazado hacia el centro por la perspectiva). Ahora:
+    //  - Antes del 1er punto: se hace raycast a las mallas y el plano pasa por el punto
+    //    impactado (normal de la cara en perspectiva, eje de la vista en ortogonales).
+    //  - Durante el trazo: el plano queda BLOQUEADO, así toda la forma es coplanar.
+    //  - Alt fuerza el plano del origen (comportamiento anterior).
+    const surfaceAware = !!drawMode && !skipSnap;
+    if (surfaceAware) {
+      if (drawingPointsRef.current.length > 0 && drawPlaneRef.current) {
+        plane = drawPlaneRef.current;
+      } else {
+        if (!e.altKey) {
+          const hit = pickSurfaceUnderRay(raycaster);
+          if (hit) {
+            const isOrthoView = type !== 'PERSPECTIVE' && type !== 'CAMERA';
+            plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+              isOrthoView ? drawPlaneNormal : hit.normal, hit.point
+            );
+          }
+        }
+        drawPlaneRef.current = plane;
+      }
+    }
     if (!raycaster.ray.intersectPlane(plane, target)) return null;
     
     if (skipSnap) return target;
@@ -400,6 +473,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         p.x = Math.round(p.x / gs) * gs;
         p.z = Math.round(p.z / gs) * gs;
       }
+      // Mantener el punto sobre el plano de trabajo tras redondear
+      if (surfaceAware) plane.projectPoint(p.clone(), p);
     }
 
     const { orthoDrawMode, drawLockAxis } = useStore.getState();
@@ -3607,18 +3682,53 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           }
         });
 
-        // ── Snap indicator: subtle green ring when snapping to start or endpoint ──
+        // ── Snap indicator: vibrant glowing snap reticle when snapping to any reference vertex ──
         if ((drawingPreviewPointRef as any)._snapping && drawingPreviewPointRef.current) {
-          const ring = new THREE.Mesh(SHARED_SNAP_RING_GEO, SHARED_SNAP_MAT);
-          ring.position.copy(drawingPreviewPointRef.current);
-          ring.renderOrder = 10;
+          const snapPos = drawingPreviewPointRef.current;
+          const cam = cameraRef.current;
+
+          // Scale reticle slightly based on distance to camera so it's always clear and visible
+          let scale = 1;
+          if (cam) {
+            const dist = cam.position.distanceTo(snapPos);
+            scale = Math.max(0.4, Math.min(3.0, dist * 0.12));
+          }
+
+          // Outer glowing ring
+          const ringGeo = new THREE.RingGeometry(0.045 * scale, 0.075 * scale, 32);
+          const ringMat = new THREE.MeshBasicMaterial({
+            color: 0xffaa00,
+            side: THREE.DoubleSide,
+            depthTest: false,
+            transparent: true,
+            opacity: 0.95
+          });
+          const ring = new THREE.Mesh(ringGeo, ringMat);
+          ring.position.copy(snapPos);
+          if (cam) ring.quaternion.copy(cam.quaternion);
+          ring.renderOrder = 9998;
           group.add(ring);
 
-          const innerDot = new THREE.Mesh(SHARED_VERTEX_GEO, SHARED_SNAP_DOT_MAT);
-          innerDot.scale.setScalar(0.012);
-          innerDot.position.copy(drawingPreviewPointRef.current);
-          innerDot.renderOrder = 11;
+          // Inner high-contrast snap dot
+          const innerGeo = new THREE.SphereGeometry(0.025 * scale, 16, 16);
+          const innerMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, depthTest: false });
+          const innerDot = new THREE.Mesh(innerGeo, innerMat);
+          innerDot.position.copy(snapPos);
+          innerDot.renderOrder = 9999;
           group.add(innerDot);
+
+          // Crosshair lines for exact alignment
+          const crossSize = 0.09 * scale;
+          const crossGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(-crossSize, 0, 0), new THREE.Vector3(crossSize, 0, 0),
+            new THREE.Vector3(0, -crossSize, 0), new THREE.Vector3(0, crossSize, 0),
+          ]);
+          const crossMat = new THREE.LineBasicMaterial({ color: 0xffea00, depthTest: false });
+          const cross = new THREE.LineSegments(crossGeo, crossMat);
+          cross.position.copy(snapPos);
+          if (cam) cross.quaternion.copy(cam.quaternion);
+          cross.renderOrder = 9999;
+          group.add(cross);
         }
 
         drawingMeshRef.current = group as any;
@@ -3627,12 +3737,19 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     };
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Screen-space endpoint snapping
-    // Snaps to the start of the current stroke or to any open shape endpoint
+    // Screen-space vertex snapping to ALL scene objects and reference figures
+    // Snaps to any vertex of cubes, cylinders, meshes, shapes or current stroke
     // ─────────────────────────────────────────────────────────────────────────
-    type SnapResult = { objId: string; anchorIdx: number; worldPos: THREE.Vector3; isOwnStart: boolean };
+    type SnapResult = {
+      objId: string;
+      objName?: string;
+      anchorIdx: number;
+      worldPos: THREE.Vector3;
+      isOwnStart: boolean;
+      isMeshVertex?: boolean;
+    };
 
-    const findSnapEndpoint = (clientX: number, clientY: number, pxThresh = 24): SnapResult | null => {
+    const findSnapEndpoint = (clientX: number, clientY: number, pxThresh = 30): SnapResult | null => {
       const cam = cameraRef.current;
       const rnd = rendererRef.current;
       if (!cam || !rnd) return null;
@@ -3646,24 +3763,31 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       let best: SnapResult | null = null;
       let bestDist = pxThresh;
 
-      // 1. Check in-progress stroke's first point (start point to close/weld)
+      // 1. Check in-progress stroke points (closing / welding with own start)
       if (drawingPointsRef.current.length >= 2) {
         const firstPt = drawingPointsRef.current[0];
         const ndc = firstPt.clone().project(cam);
         if (ndc.z <= 1) {
           const px = (ndc.x * 0.5 + 0.5) * w;
           const py = (ndc.y * -0.5 + 0.5) * h;
-          const d = Math.sqrt((px - sx) ** 2 + (py - sy) ** 2);
+          const d = Math.hypot(px - sx, py - sy);
           if (d < bestDist) {
             bestDist = d;
-            best = { objId: drawingObjectIdRef.current || '__CURRENT__', anchorIdx: 0, worldPos: firstPt.clone(), isOwnStart: true };
+            best = {
+              objId: drawingObjectIdRef.current || '__CURRENT__',
+              objName: 'Inicio del trazo',
+              anchorIdx: 0,
+              worldPos: firstPt.clone(),
+              isOwnStart: true,
+              isMeshVertex: false
+            };
           }
         }
       }
 
-      // 2. Check all open SHAPE objects in project
+      // 2. Check ALL objects in project (reference figures, cubes, meshes, shapes)
       for (const obj of projectRef.current.objects) {
-        if (obj.type !== 'SHAPE' || obj.parameters.closed || obj.vertices.length < 1) continue;
+        if (!obj.vertices || obj.vertices.length === 0) continue;
 
         const _interp = getInterpolatedTransform(obj, currentTime);
         const mat4 = new THREE.Matrix4().compose(
@@ -3674,22 +3798,32 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
         const checkVertex = (vi: number) => {
           const v   = obj.vertices[vi];
+          if (!v) return;
           const off = obj.vertexOffsets?.[vi] ?? [0, 0, 0];
-          const world = new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2]).applyMatrix4(mat4);
+          const world = new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
           const ndc   = world.clone().project(cam);
           if (ndc.z > 1) return; // behind camera
           const px = (ndc.x *  0.5 + 0.5) * w;
           const py = (ndc.y * -0.5 + 0.5) * h;
-          const d  = Math.sqrt((px - sx) ** 2 + (py - sy) ** 2);
+          const d  = Math.hypot(px - sx, py - sy);
           if (d < bestDist) {
             bestDist = d;
             const isOwnStart = (obj.id === drawingObjectIdRef.current && vi === 0) || (drawingObjectIdRef.current === '__CURRENT__' && vi === 0);
-            best = { objId: obj.id, anchorIdx: vi, worldPos: world, isOwnStart };
+            best = {
+              objId: obj.id,
+              objName: obj.name || 'Figura',
+              anchorIdx: vi,
+              worldPos: world,
+              isOwnStart,
+              isMeshVertex: obj.type !== 'SHAPE'
+            };
           }
         };
 
-        checkVertex(0);
-        if (obj.vertices.length > 1) checkVertex(obj.vertices.length - 1);
+        // For open shapes, check endpoints and interior vertices; for 3D meshes/cubes, check all vertices
+        for (let i = 0; i < obj.vertices.length; i++) {
+          checkVertex(i);
+        }
       }
 
       return best;
@@ -3741,11 +3875,25 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
       if (drawingObjectIdRef.current && drawingObjectIdRef.current !== '__CURRENT__') {
         const existObj = projectRef.current.objects.find(o => o.id === drawingObjectIdRef.current);
-        useStore.getState().updateObject(drawingObjectIdRef.current, {
-          vertices,
-          bezierHandles: handles,
-          parameters: { ...existObj?.parameters, closed: closeShape, shapeType: effectiveShapeType as any },
-        } as any);
+        if (existObj) {
+          const _interp = getInterpolatedTransform(existObj, currentTime);
+          const mat4Inv = new THREE.Matrix4().compose(
+            new THREE.Vector3().fromArray(_interp.position),
+            new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+            new THREE.Vector3().fromArray(_interp.scale),
+          ).invert();
+          const localVerts = vertices.map(v => {
+            const lv = new THREE.Vector3(...v).applyMatrix4(mat4Inv);
+            return [lv.x, lv.y, lv.z] as V3;
+          });
+          useStore.getState().updateObject(drawingObjectIdRef.current, {
+            vertices: localVerts,
+            bezierHandles: handles,
+            parameters: { ...existObj.parameters, closed: closeShape, shapeType: effectiveShapeType as any },
+          } as any);
+        } else {
+          addShape(drawMode as any, vertices, closeShape, handles);
+        }
       } else {
         addShape(drawMode as any, vertices, closeShape, handles);
       }
@@ -3901,9 +4049,20 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           const p1 = drawingPointsRef.current[0];
           const p2 = point;
           let vertices: [number,number,number][];
-          if (type === 'FRONT' || type === 'BACK')     vertices = [[p1.x,p1.y,0],[p2.x,p1.y,0],[p2.x,p2.y,0],[p1.x,p2.y,0]];
-          else if (type === 'LEFT' || type === 'RIGHT') vertices = [[0,p1.y,p1.z],[0,p1.y,p2.z],[0,p2.y,p2.z],[0,p2.y,p1.z]];
-          else                      vertices = [[p1.x,0,p1.z],[p2.x,0,p1.z],[p2.x,0,p2.z],[p1.x,0,p2.z]];
+          // Base del rectángulo según el eje dominante de la normal del plano de trabajo
+          const pl = drawPlaneRef.current;
+          const nrm = pl ? pl.normal : (
+            (type === 'FRONT' || type === 'BACK') ? new THREE.Vector3(0, 0, 1) :
+            (type === 'LEFT' || type === 'RIGHT') ? new THREE.Vector3(1, 0, 0) :
+                                                    new THREE.Vector3(0, 1, 0));
+          const ax = [Math.abs(nrm.x), Math.abs(nrm.y), Math.abs(nrm.z)];
+          const dom = ax.indexOf(Math.max(...ax));
+          const c: THREE.Vector3[] =
+            dom === 2 ? [new THREE.Vector3(p1.x,p1.y,p1.z), new THREE.Vector3(p2.x,p1.y,p1.z), new THREE.Vector3(p2.x,p2.y,p1.z), new THREE.Vector3(p1.x,p2.y,p1.z)] :
+            dom === 0 ? [new THREE.Vector3(p1.x,p1.y,p1.z), new THREE.Vector3(p1.x,p1.y,p2.z), new THREE.Vector3(p1.x,p2.y,p2.z), new THREE.Vector3(p1.x,p2.y,p1.z)] :
+                        [new THREE.Vector3(p1.x,p1.y,p1.z), new THREE.Vector3(p2.x,p1.y,p1.z), new THREE.Vector3(p2.x,p1.y,p2.z), new THREE.Vector3(p1.x,p1.y,p2.z)];
+          if (pl) c.forEach(v => pl.projectPoint(v.clone(), v));
+          vertices = c.map(v => [v.x, v.y, v.z] as [number,number,number]);
           addShape('rect', vertices, true);
           drawingPointsRef.current       = [];
           drawingHandlesRef.current      = [];
@@ -3919,32 +4078,55 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       // ── CASE A: Nothing drawn yet — start from a snap point OR free click ──
       if (drawingPointsRef.current.length === 0) {
         if (snap) {
-          // Continue from an existing endpoint: load the shape into drawing buffers
-          const existObj = projectRef.current.objects.find(o => o.id === snap.objId)!;
-          drawingObjectIdRef.current = snap.objId;
+          const existObj = projectRef.current.objects.find(o => o.id === snap.objId);
+          if (existObj && existObj.type === 'SHAPE' && !existObj.parameters?.closed && (snap.anchorIdx === 0 || snap.anchorIdx === existObj.vertices.length - 1)) {
+            // Continue from an existing open shape endpoint
+            drawingObjectIdRef.current = snap.objId;
 
-          const verts = existObj.vertices.map(v => new THREE.Vector3(...v));
-          const handles: BezierHandle[] = existObj.bezierHandles
-            ? existObj.bezierHandles.map(h => ({ out: [...h.out] as [number,number,number], in: [...h.in] as [number,number,number], broken: h.broken }))
-            : existObj.vertices.map(() => ({ out: [0,0,0] as [number,number,number], in: [0,0,0] as [number,number,number], broken: false }));
+            // Los puntos del trazo viven en coordenadas de MUNDO (igual que findSnapEndpoint),
+            // así que se convierte la forma existente aplicando su transformación.
+            const objMat = getShapeMatrix(existObj);
+            const linMat = new THREE.Matrix3().setFromMatrix4(objMat);
+            const verts = existObj.vertices.map(v => new THREE.Vector3(...v).applyMatrix4(objMat));
+            const toWorldDir = (a: [number,number,number]) => {
+              const d = new THREE.Vector3(...a).applyMatrix3(linMat);
+              return [d.x, d.y, d.z] as [number,number,number];
+            };
+            const handles: BezierHandle[] = existObj.bezierHandles
+              ? existObj.bezierHandles.map(h => ({ out: toWorldDir(h.out as any), in: toWorldDir(h.in as any), broken: h.broken }))
+              : existObj.vertices.map(() => ({ out: [0,0,0] as [number,number,number], in: [0,0,0] as [number,number,number], broken: false }));
+            lockDrawPlaneFromPoints(verts);
 
-          if (snap.anchorIdx === 0) {
-            // Clicked start → reverse so we draw from the tail
-            drawingPointsRef.current  = [...verts].reverse();
-            drawingHandlesRef.current = [...handles].reverse().map(h => ({
-              out: [...h.in]  as [number,number,number],
-              in:  [...h.out] as [number,number,number],
-              broken: h.broken,
-            }));
+            if (snap.anchorIdx === 0) {
+              // Clicked start → reverse so we draw from the tail
+              drawingPointsRef.current  = [...verts].reverse();
+              drawingHandlesRef.current = [...handles].reverse().map(h => ({
+                out: [...h.in]  as [number,number,number],
+                in:  [...h.out] as [number,number,number],
+                broken: h.broken,
+              }));
+            } else {
+              drawingPointsRef.current  = verts;
+              drawingHandlesRef.current = handles;
+            }
+            schedulePreviewUpdate();
+            return;
           } else {
-            drawingPointsRef.current  = verts;
-            drawingHandlesRef.current = handles;
+            // Start drawing a new stroke with its first point EXACTLY at the snapped reference vertex!
+            drawingObjectIdRef.current = null;
+            drawingPointsRef.current = [snap.worldPos.clone()];
+            drawingHandlesRef.current = [{ out: [0,0,0], in: [0,0,0], broken: false }];
+            if (drawMode === 'bezier') {
+              isDrawingHandleRef.current = true;
+              try { (e.target as Element).setPointerCapture(e.pointerId); } catch {}
+            }
+            schedulePreviewUpdate();
+            return;
           }
-          schedulePreviewUpdate();
-          return;
         }
 
         // Free first point
+        drawingObjectIdRef.current = null;
         const point = getPoint(e);
         if (!point) return;
         drawingPointsRef.current.push(point);
@@ -3958,11 +4140,15 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         return;
       }
 
-      // ── CASE B: Stroke in progress — snap click closes/connects, else add point ──
+      // ── CASE B: Stroke in progress — snap click closes/connects or adds exact vertex point ──
       if (snap) {
-        // Need at least 2 committed points before we can close/connect
-        if (drawingPointsRef.current.length >= 1) {
+        if (snap.isOwnStart || (drawingPointsRef.current.length >= 2 && drawingPointsRef.current[0].distanceTo(snap.worldPos) < 0.35)) {
           finishStroke(snap);
+          return;
+        } else {
+          drawingPointsRef.current.push(snap.worldPos.clone());
+          drawingHandlesRef.current.push({ out: [0,0,0], in: [0,0,0], broken: false });
+          schedulePreviewUpdate();
           return;
         }
       }
@@ -4610,12 +4796,31 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                 gizmoWorldPos.fromArray(_interp.position);
               }
             } else if (editMode === 'OBJECT') {
-              const mesh = getObjectMesh(selectedObjectId);
-              if (mesh) {
-                mesh.getWorldPosition(gizmoWorldPos);
+              if (selObj.type === 'SHAPE' && selObj.vertices && selObj.vertices.length > 0) {
+                const centroid = new THREE.Vector3();
+                selObj.vertices.forEach((v, i) => {
+                  const off = selObj.vertexOffsets?.[i] ?? [0,0,0];
+                  centroid.add(new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]));
+                });
+                centroid.divideScalar(selObj.vertices.length);
+                const mesh = getObjectMesh(selectedObjectId);
+                if (mesh) {
+                  gizmoWorldPos = centroid.applyMatrix4(mesh.matrixWorld);
+                } else {
+                  const _interp = getInterpolatedTransform(selObj, currentTime);
+                  gizmoWorldPos = centroid
+                    .multiply(new THREE.Vector3(..._interp.scale))
+                    .applyEuler(new THREE.Euler(..._interp.rotation))
+                    .add(new THREE.Vector3(..._interp.position));
+                }
               } else {
-                const _interp = getInterpolatedTransform(selObj, currentTime);
-                gizmoWorldPos.fromArray(_interp.position);
+                const mesh = getObjectMesh(selectedObjectId);
+                if (mesh) {
+                  mesh.getWorldPosition(gizmoWorldPos);
+                } else {
+                  const _interp = getInterpolatedTransform(selObj, currentTime);
+                  gizmoWorldPos.fromArray(_interp.position);
+                }
               }
             } else {
               const mesh = getObjectMesh(selectedObjectId);
@@ -7598,11 +7803,22 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           return;
         }
         // Bridge / Crear Cara (F)
-        if ((event.key === 'f' || event.key === 'F') && !event.ctrlKey && selectedEdgeIndices.length >= 4) {
+        if ((event.key === 'f' || event.key === 'F') && !event.ctrlKey) {
           event.preventDefault();
-          useStore.getState().bridgeSelectedEdges(selectedObjectId, selectedEdgeIndices);
+          if (selectedEdgeIndices.length >= 2) {
+            useStore.getState().bridgeSelectedEdges(selectedObjectId, selectedEdgeIndices);
+          } else {
+            useStore.getState().createFaceFromVertices(selectedObjectId);
+          }
           return;
         }
+      }
+
+      // Global F shortcut for objects without faces / shapes
+      if (editMode === 'OBJECT' && selectedObjectId && (event.key === 'f' || event.key === 'F') && !event.ctrlKey) {
+        event.preventDefault();
+        useStore.getState().createFaceFromVertices(selectedObjectId);
+        return;
       }
 
       // ── GLOBAL EDIT MODE SHORTCUTS ──
@@ -7946,8 +8162,24 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           }
         }
       } else {
-        // OBJECT mode: Use the mesh's world position which is already interpolated in Scene sync
-        if (mesh) {
+        // OBJECT mode:
+        if (selObj.type === 'SHAPE' && selObj.vertices && selObj.vertices.length > 0) {
+          const centroid = new THREE.Vector3();
+          selObj.vertices.forEach((v, i) => {
+            const off = selObj.vertexOffsets?.[i] ?? [0,0,0];
+            centroid.add(new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]));
+          });
+          centroid.divideScalar(selObj.vertices.length);
+          if (mesh) {
+            gizmoPos = centroid.applyMatrix4(mesh.matrixWorld);
+          } else {
+            const _interp = getInterpolatedTransform(selObj, currentTime);
+            gizmoPos = centroid
+              .multiply(new THREE.Vector3(..._interp.scale))
+              .applyEuler(new THREE.Euler(..._interp.rotation))
+              .add(new THREE.Vector3(..._interp.position));
+          }
+        } else if (mesh) {
           mesh.getWorldPosition(gizmoPos);
         } else {
           const _interp = getInterpolatedTransform(selObj, currentTime);

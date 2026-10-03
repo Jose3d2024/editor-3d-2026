@@ -27,7 +27,7 @@ export function BotonRetopologia({ onMeshUpdated }: Props) {
   const [preset, setPreset] = useState<Preset>('low');
   const [customRatio, setCustomRatio] = useState(0.15);
   const [preserveBorders, setPreserveBorders] = useState(false);
-  const [bvhSnap, setBvhSnap] = useState(true);
+  const [bvhSnap, setBvhSnap] = useState(false);
   const [maxError, setMaxError] = useState(0.02); // 2% del bbox
   const [analisis, setAnalisis] = useState<string | null>(null);
 
@@ -134,6 +134,8 @@ export function BotonRetopologia({ onMeshUpdated }: Props) {
 
     setCargando(true);
     setResultado('Analizando geometría y materiales...');
+    // Ceder el hilo de ejecución al navegador para que la UI se renderice
+    await new Promise((resolve) => setTimeout(resolve, 30));
 
     try {
       await (MeshoptSimplifier as any).ready;
@@ -290,57 +292,100 @@ export function BotonRetopologia({ onMeshUpdated }: Props) {
         vertMatIndices[idxArray[t + 2]] = mat;
       }
 
-      // ── 3. BVH de la geometría original (para el snap y transferencia de material) ──
-      const bvhGeo = new THREE.BufferGeometry();
-      bvhGeo.setAttribute('position', new THREE.BufferAttribute(posArray.slice(), 3));
-      bvhGeo.setIndex(new THREE.BufferAttribute(idxArray.slice(), 1));
-      const bvh = new MeshBVH(bvhGeo);
-
-      // ── 4. Simplificar con meshoptimizer ──
+      // ── 3. Simplificar con meshoptimizer ──
       const targetFaces = Math.max(4, Math.floor(totalFacesOrig * ratioActual));
       const targetIndexCount = targetFaces * 3;
 
       setResultado(`Simplificando ${totalFacesOrig.toLocaleString()} → ${targetFaces.toLocaleString()} caras...`);
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       const flags: string[] = [];
       if (preserveBorders) flags.push('LockBorder');
 
-      const [simplifiedIndices, resultError] = (MeshoptSimplifier as any).simplify(
-        idxArray,
-        posArray,
-        3,
-        targetIndexCount,
-        maxError,
-        flags
-      );
+      let simplifiedIndices: Uint32Array;
+      let resultError = 0;
+
+      try {
+        const [resIdx, resErr] = (MeshoptSimplifier as any).simplify(
+          idxArray,
+          posArray,
+          3,
+          targetIndexCount,
+          maxError,
+          flags
+        );
+        simplifiedIndices = resIdx as Uint32Array;
+        resultError = resErr;
+
+        // Si la simplificación con LockBorder no logró reducir por bordes rígidos, intentar con tolerancia adaptada
+        if (simplifiedIndices.length >= idxArray.length && flags.length > 0) {
+          const [resIdxFallback, resErrFallback] = (MeshoptSimplifier as any).simplify(
+            idxArray,
+            posArray,
+            3,
+            targetIndexCount,
+            Math.max(maxError, 0.05),
+            []
+          );
+          if (resIdxFallback && resIdxFallback.length < simplifiedIndices.length) {
+            simplifiedIndices = resIdxFallback as Uint32Array;
+            resultError = resErrFallback;
+          }
+        }
+      } catch (simplifyErr) {
+        console.warn('Error en simplify, probando simplifySloppy:', simplifyErr);
+        const [sloppyIdx, sloppyErr] = (MeshoptSimplifier as any).simplifySloppy(
+          idxArray,
+          posArray,
+          3,
+          targetIndexCount,
+          maxError
+        );
+        simplifiedIndices = sloppyIdx as Uint32Array;
+        resultError = sloppyErr;
+      }
 
       const simplifiedIdxArray = simplifiedIndices as Uint32Array;
       const facesAfter = simplifiedIdxArray.length / 3;
 
-      // ── 5. BVH snap: reproyectar vértices a la superficie original ──
+      // ── 4. BVH snap opcional (solo si el usuario lo activa explícitamente) ──
       let projectedCount = 0;
-      if (bvhSnap) {
-        setResultado(`Proyectando ${facesAfter.toLocaleString()} caras a la superficie original...`);
-        const tmpTarget: any = { point: new THREE.Vector3(), distance: 0 };
-        const pt = new THREE.Vector3();
-        // Solo proyectar vértices usados por las caras simplificadas
-        const usedVerts = new Set<number>();
-        for (let i = 0; i < simplifiedIdxArray.length; i++) {
-          usedVerts.add(simplifiedIdxArray[i]);
-        }
-        usedVerts.forEach((vi) => {
-          pt.set(posArray[vi * 3], posArray[vi * 3 + 1], posArray[vi * 3 + 2]);
-          bvh.closestPointToPoint(pt, tmpTarget);
-          if (tmpTarget.point) {
-            posArray[vi * 3] = tmpTarget.point.x;
-            posArray[vi * 3 + 1] = tmpTarget.point.y;
-            posArray[vi * 3 + 2] = tmpTarget.point.z;
-            projectedCount++;
+      if (bvhSnap && facesAfter > 0) {
+        setResultado(`Proyectando vértices a la superficie original...`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        try {
+          const bvhGeo = new THREE.BufferGeometry();
+          bvhGeo.setAttribute('position', new THREE.BufferAttribute(posArray.slice(), 3));
+          bvhGeo.setIndex(new THREE.BufferAttribute(idxArray.slice(), 1));
+          const bvh = new MeshBVH(bvhGeo, { maxLeafTris: 16 });
+
+          const tmpTarget: any = { point: new THREE.Vector3(), distance: 0 };
+          const pt = new THREE.Vector3();
+          const usedVerts = new Set<number>();
+          for (let i = 0; i < simplifiedIdxArray.length; i++) {
+            usedVerts.add(simplifiedIdxArray[i]);
           }
-        });
+
+          usedVerts.forEach((vi) => {
+            pt.set(posArray[vi * 3], posArray[vi * 3 + 1], posArray[vi * 3 + 2]);
+            bvh.closestPointToPoint(pt, tmpTarget);
+            if (tmpTarget.point) {
+              posArray[vi * 3] = tmpTarget.point.x;
+              posArray[vi * 3 + 1] = tmpTarget.point.y;
+              posArray[vi * 3 + 2] = tmpTarget.point.z;
+              projectedCount++;
+            }
+          });
+        } catch (bvhErr) {
+          console.warn('Error durante BVH snap:', bvhErr);
+        }
       }
 
-      // ── 6. Convertir a formato del store y asignar material por cara ──
+      // ── 5. Convertir a formato del store y asignar material por cara ──
+      setResultado('Construyendo malla optimizada...');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
       const usedSet = new Set<number>();
       for (let i = 0; i < simplifiedIdxArray.length; i++) usedSet.add(simplifiedIdxArray[i]);
 
@@ -354,27 +399,18 @@ export function BotonRetopologia({ onMeshUpdated }: Props) {
       }
 
       const newFaces: MeshFace[] = [];
-      const triCentroid = new THREE.Vector3();
-      const bvhMatTarget: any = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 };
 
       for (let i = 0; i < simplifiedIdxArray.length; i += 3) {
         const origI0 = simplifiedIdxArray[i];
         const origI1 = simplifiedIdxArray[i + 1];
         const origI2 = simplifiedIdxArray[i + 2];
 
-        // Calcular baricentro del triángulo simplificado para muestreo de material
-        triCentroid.set(
-          (posArray[origI0 * 3] + posArray[origI1 * 3] + posArray[origI2 * 3]) / 3,
-          (posArray[origI0 * 3 + 1] + posArray[origI1 * 3 + 1] + posArray[origI2 * 3 + 1]) / 3,
-          (posArray[origI0 * 3 + 2] + posArray[origI1 * 3 + 2] + posArray[origI2 * 3 + 2]) / 3
-        );
-
-        let faceMatIndex = vertMatIndices[origI0] ?? 0;
-        bvhMatTarget.faceIndex = -1;
-        bvh.closestPointToPoint(triCentroid, bvhMatTarget);
-        if (bvhMatTarget.faceIndex >= 0 && bvhMatTarget.faceIndex < origTriMaterials.length) {
-          faceMatIndex = origTriMaterials[bvhMatTarget.faceIndex];
-        }
+        // Mapeo directo y ultra-rápido de material por vértice
+        const m0 = vertMatIndices[origI0] ?? 0;
+        const m1 = vertMatIndices[origI1] ?? 0;
+        const m2 = vertMatIndices[origI2] ?? 0;
+        // Voto por mayoría de vértices para asignar el material exacto a la cara simplificada
+        const faceMatIndex = (m0 === m1 || m0 === m2) ? m0 : (m1 === m2 ? m1 : m0);
 
         newFaces.push({
           indices: [
@@ -386,7 +422,7 @@ export function BotonRetopologia({ onMeshUpdated }: Props) {
         });
       }
 
-      // ── 7. Actualizar el objeto conservando materiales individuales y asignación por cara ──
+      // ── 6. Actualizar el objeto conservando materiales individuales y asignación por cara ──
       const primaryMaterialId = materialIdsMap[0] || currentObj?.materialId;
 
       useStore.setState((s) => ({
@@ -416,7 +452,7 @@ export function BotonRetopologia({ onMeshUpdated }: Props) {
 
       setResultado(
         `✅ ${totalFacesOrig.toLocaleString()} → ${facesAfter.toLocaleString()} caras (${reduccionPct}% reducción)\n` +
-        `📐 Error máx: ${errorPct}% · ${projectedCount.toLocaleString()} vértices proyectados\n` +
+        `📐 Error máx: ${errorPct}%\n` +
         `🎨 Materiales preservados: ${Object.keys(materialIdsMap).length > 0 ? Object.keys(materialIdsMap).length : 1}`
       );
 

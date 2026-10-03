@@ -35,7 +35,6 @@ export function optimizeMeshInWorker(
     worker.onmessage = (event: MessageEvent<OptimizationWorkerResponse>) => {
       const response = event.data;
       if (!response || response.id !== requestId || settled) return;
-
       settled = true;
       cleanup();
 
