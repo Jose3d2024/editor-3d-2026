@@ -388,6 +388,29 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     return { point: hit.point.clone(), normal };
   };
 
+  // Bloquea el plano de trabajo pasando EXACTAMENTE por un punto de mundo (p. ej. un vértice
+  // con snap). Sin esto, al iniciar un trazo con snap el plano quedaba con el valor del
+  // último hover (normalmente el del origen) y los puntos siguientes caían en el centro.
+  const lockDrawPlaneAtPoint = (e: PointerEvent | MouseEvent, worldPos: THREE.Vector3) => {
+    const isOrthoView = type !== 'PERSPECTIVE' && type !== 'CAMERA';
+    let normal =
+      (type === 'FRONT' || type === 'BACK') ? new THREE.Vector3(0, 0, 1) :
+      (type === 'LEFT' || type === 'RIGHT') ? new THREE.Vector3(1, 0, 0) :
+                                              new THREE.Vector3(0, 1, 0);
+    if (!isOrthoView && !e.altKey && rendererRef.current && cameraRef.current) {
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const rc = new THREE.Raycaster();
+      rc.setFromCamera(mouse, cameraRef.current);
+      const hit = pickSurfaceUnderRay(rc);
+      if (hit) normal = hit.normal;
+    }
+    drawPlaneRef.current = new THREE.Plane().setFromNormalAndCoplanarPoint(normal.normalize(), worldPos);
+  };
+
   // Plano de trabajo a partir de los puntos de una forma existente (fórmula de Newell)
   const lockDrawPlaneFromPoints = (pts: THREE.Vector3[]) => {
     const n = new THREE.Vector3();
@@ -2916,9 +2939,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       }
 
       // ── Wireframe overlay (Topology-based) ───────────────────────────────
+      const isEditModeActive = editMode !== 'OBJECT' && isSelected;
       const uniqueEdges = (obj.faces && obj.faces.length > 0) || (obj.wireframeEdges && obj.wireframeEdges.length > 0)
         ? extractUniqueEdges(obj, {
-            dissolveCoplanars: true,
+            dissolveCoplanars: isBlueprintActive || (!isEditModeActive && viewMode !== 'WIREFRAME' && viewMode !== 'TEXTURED_WIREFRAME' && viewMode !== 'FACES_VERTICES'),
             coplanarAngleDeg: isBlueprintActive || obj.silhouetteOnly ? Math.max(35.0, obj.creaseAngle ?? 35.0) : (obj.creaseAngle ?? 15.0),
             silhouetteOnly: isBlueprintActive || !!obj.silhouetteOnly,
           })
@@ -3488,11 +3512,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     if (!canvas) return;
 
     // Snap a world point to grid intersections (axes depend on view)
-    const toV3 = (p: THREE.Vector3): [number,number,number] => {
-      if (type === 'FRONT' || type === 'BACK') return [p.x, p.y, 0];
-      if (type === 'LEFT' || type === 'RIGHT')  return [0,   p.y, p.z];
-      return [p.x, 0, p.z]; // TOP, BOTTOM or PERSPECTIVE
-    };
+    // Los puntos ya son coplanares sobre el plano de trabajo bloqueado (drawPlaneRef),
+    // que puede no pasar por el origen (p. ej. cara superior del cubo). NO se debe
+    // aplanar ninguna coordenada a 0: antes y=0 en perspectiva hundía la forma al
+    // cerrarla.
+    const toV3 = (p: THREE.Vector3): [number,number,number] => [p.x, p.y, p.z];
 
     const updatePreview = () => {
       if (!sceneRef.current) return;
@@ -4116,6 +4140,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             drawingObjectIdRef.current = null;
             drawingPointsRef.current = [snap.worldPos.clone()];
             drawingHandlesRef.current = [{ out: [0,0,0], in: [0,0,0], broken: false }];
+            lockDrawPlaneAtPoint(e, snap.worldPos);
             if (drawMode === 'bezier') {
               isDrawingHandleRef.current = true;
               try { (e.target as Element).setPointerCapture(e.pointerId); } catch {}

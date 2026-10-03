@@ -1489,10 +1489,12 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
   {/* ── SECCIÓN 5: AJUSTE A CARAS (FACE SNAPPING) ── */}
   {(viewModeTab === 'ACCORDION' || activeSubTab === 'SNAP') && (
   <div className="border border-zinc-800/80 rounded-xl overflow-hidden bg-zinc-900/30">
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => toggleSection('faceSnap')}
-      className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors"
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('faceSnap'); } }}
+      className="w-full flex items-center justify-between p-3 text-left cursor-pointer group hover:bg-white/[0.02] transition-colors select-none"
     >
       <span className="font-bold text-zinc-200 group-hover:text-white flex items-center gap-1.5 text-xs">
         <ChevronDown size={14} className={`text-zinc-400 transition-transform ${(viewModeTab === 'TABS' || sectionsOpen.faceSnap) ? '' : '-rotate-90'}`} />
@@ -1514,7 +1516,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
       >
         {faceSnapConfig?.enabled ? 'ACTIVO (ON)' : 'OFF'}
       </button>
-    </button>
+    </div>
 
     {(viewModeTab === 'TABS' || sectionsOpen.faceSnap) && (
       <div className="px-3 pb-3 space-y-2">

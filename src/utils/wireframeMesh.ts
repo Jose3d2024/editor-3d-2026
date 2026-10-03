@@ -199,16 +199,19 @@ export function extractUniqueEdges(
         const n1 = faceNormals[f1];
         if (n0 && n1) {
           const dot = n0.dot(n1);
-          // 1. Omitir si es estrictamente coplanar (< coplanarAngleDeg)
-          if (dot >= cosTol) {
-            return;
-          }
 
-          // 2. Omitir DIAGONALES CRUZADAS INTERIORES QUE DIVIDEN QUADS O CARAS:
+          // Si ambas caras son triángulos (ej. mallas trianguladas), solo disolver
+          // la diagonal interna que cruza el cuadrilátero. Si son caras cuadriláteras (Quads)
+          // o N-gons, la arista es un límite real de la topología y NUNCA se debe eliminar.
           const face0 = faces[f0];
           const face1 = faces[f1];
           const idxs0 = (face0.indices && face0.indices.length > 0) ? face0.indices : (Array.isArray(face0) ? face0 : []);
           const idxs1 = (face1.indices && face1.indices.length > 0) ? face1.indices : (Array.isArray(face1) ? face1 : []);
+
+          if (isSilhouette && dot >= cosTol) {
+            // En modo silueta estricto de contorno, ocultar aristas planas
+            return;
+          }
 
           if (idxs0.length === 3 && idxs1.length === 3) {
             // Localizar el tercer vértice en cada triángulo
