@@ -263,6 +263,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   const drawPlaneRef = useRef<THREE.Plane | null>(null);
   const drawingHandlesRef = useRef<BezierHandle[]>([]);
   const drawingObjectIdRef = useRef<string | null>(null);
+  const drawingStartAnchorIdxRef = useRef<number | null>(null);
   const drawingMeshRef = useRef<THREE.Object3D | null>(null);
   const drawingPreviewPointRef = useRef<THREE.Vector3 | null>(null);
   const isDrawingHandleRef = useRef(false);
@@ -1700,10 +1701,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     return () => cancelAnimationFrame(id);
   }, [type, viewCameraId]);
 
-  // ── 1.5b Disable OrbitControls while draw mode is active ────────────────
+  // ── 1.5b OrbitControls navigation during draw mode ───────────────────────
   // OrbitControls and drawing listeners share the same canvas element.
-  // Without this, every pointer drag in draw mode ALSO pans/rotates the camera,
-  // causing: (a) Bézier handles not working, (b) points placed at wrong coords.
+  // During drawMode, Left Click is reserved for drawing points/handles, while
+  // Right Click rotates the camera in Perspective (or pans in Orthographic views)
+  // and Middle Click zooms/dollies.
   useEffect(() => {
     const ctrl = controlsRef.current;
     if (!ctrl) return;
@@ -1712,7 +1714,17 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       silueta.activePlane.toUpperCase() === type.toUpperCase()
     );
 
-    ctrl.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
+    ctrl.enabled = !isSiluetaActiveInThisViewport && !moveReferenceMode;
+    const isPlanarOrtho = type !== 'PERSPECTIVE' && type !== 'CAMERA';
+    if (drawMode) {
+      ctrl.mouseButtons = isPlanarOrtho
+        ? { LEFT: -1 as any, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
+        : { LEFT: -1 as any, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+    } else {
+      ctrl.mouseButtons = isPlanarOrtho
+        ? { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
+        : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    }
     return () => { if (controlsRef.current) controlsRef.current.enabled = true; };
   }, [drawMode, silueta.activePlane, type, moveReferenceMode]);
 
@@ -2483,7 +2495,16 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
           // ── Build display curve ───────────────────────────────────────────
           let curveLine: THREE.Object3D;
-          if (isBezier && ctrlPts.length >= 2 && obj.bezierHandles) {
+          if (obj.edges && obj.edges.length > 0) {
+            const edgePoints: THREE.Vector3[] = [];
+            obj.edges.forEach(([i1, i2]) => {
+              if (ctrlPts[i1] && ctrlPts[i2]) {
+                edgePoints.push(ctrlPts[i1], ctrlPts[i2]);
+              }
+            });
+            const geo = new THREE.BufferGeometry().setFromPoints(edgePoints);
+            curveLine = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: objColor, linewidth: 2 }));
+          } else if (isBezier && ctrlPts.length >= 2 && obj.bezierHandles) {
             // Cubic Bezier chain: each segment uses anchor[i], anchor[i]+out[i],
             // anchor[i+1]+in[i+1], anchor[i+1]
             const allCurvePoints: THREE.Vector3[] = [];
@@ -3809,7 +3830,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         }
       }
 
-      // 2. Check ALL objects in project (reference figures, cubes, meshes, shapes)
+      // 2. Check ALL objects in project
       for (const obj of projectRef.current.objects) {
         if (!obj.vertices || obj.vertices.length === 0) continue;
 
@@ -3844,7 +3865,6 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           }
         };
 
-        // For open shapes, check endpoints and interior vertices; for 3D meshes/cubes, check all vertices
         for (let i = 0; i < obj.vertices.length; i++) {
           checkVertex(i);
         }
@@ -3888,7 +3908,6 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         drawingObjectIdRef.current     = null;
         drawingPreviewPointRef.current = null;
         updatePreview();
-        useStore.getState().setDrawMode(null);
         return;
       }
 
@@ -3899,21 +3918,64 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
       if (drawingObjectIdRef.current && drawingObjectIdRef.current !== '__CURRENT__') {
         const existObj = projectRef.current.objects.find(o => o.id === drawingObjectIdRef.current);
-        if (existObj) {
+        if (existObj && drawingStartAnchorIdxRef.current !== null && existObj.vertices) {
+          const startIdx = drawingStartAnchorIdxRef.current;
+          const newPts = pts.slice(1);
+          const newHnds = hnds.slice(1);
+          const N_orig = existObj.vertices.length;
+
           const _interp = getInterpolatedTransform(existObj, currentTime);
           const mat4Inv = new THREE.Matrix4().compose(
             new THREE.Vector3().fromArray(_interp.position),
             new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
             new THREE.Vector3().fromArray(_interp.scale),
           ).invert();
-          const localVerts = vertices.map(v => {
-            const lv = new THREE.Vector3(...v).applyMatrix4(mat4Inv);
+
+          const newLocalVerts = newPts.map(p => {
+            const lv = p.clone().applyMatrix4(mat4Inv);
             return [lv.x, lv.y, lv.z] as V3;
           });
-          useStore.getState().updateObject(drawingObjectIdRef.current, {
-            vertices: localVerts,
-            bezierHandles: handles,
-            parameters: { ...existObj.parameters, closed: closeShape, shapeType: effectiveShapeType as any },
+
+          const linMatInv = new THREE.Matrix3().setFromMatrix4(mat4Inv);
+          const toLocalDir = (a: [number,number,number]) => {
+            const d = new THREE.Vector3(...a).applyMatrix3(linMatInv);
+            return [d.x, d.y, d.z] as [number,number,number];
+          };
+          const newLocalHandles: BezierHandle[] = newHnds.map(h => ({
+            out: toLocalDir(h.out as any),
+            in:  toLocalDir(h.in as any),
+            broken: h.broken,
+          }));
+
+          const baseEdges: [number, number][] = existObj.edges && existObj.edges.length > 0
+            ? [...existObj.edges]
+            : (() => {
+                const be: [number, number][] = [];
+                for (let i = 0; i < N_orig; i++) {
+                  if (existObj.parameters?.closed || i < N_orig - 1) {
+                    be.push([i, (i + 1) % N_orig]);
+                  }
+                }
+                return be;
+              })();
+
+          const newEdges: [number, number][] = [];
+          if (newLocalVerts.length > 0) {
+            newEdges.push([startIdx, N_orig]);
+            for (let k = 0; k < newLocalVerts.length - 1; k++) {
+              newEdges.push([N_orig + k, N_orig + k + 1]);
+            }
+            if (snapResult && snapResult.objId === existObj.id && snapResult.anchorIdx !== undefined && snapResult.anchorIdx !== startIdx) {
+              newEdges.push([N_orig + newLocalVerts.length - 1, snapResult.anchorIdx]);
+            } else if (closeShape) {
+              newEdges.push([N_orig + newLocalVerts.length - 1, startIdx]);
+            }
+          }
+
+          useStore.getState().updateObject(existObj.id, {
+            vertices: [...existObj.vertices, ...newLocalVerts],
+            edges: [...baseEdges, ...newEdges],
+            bezierHandles: existObj.bezierHandles ? [...existObj.bezierHandles, ...newLocalHandles] : undefined,
           } as any);
         } else {
           addShape(drawMode as any, vertices, closeShape, handles);
@@ -3922,12 +3984,12 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         addShape(drawMode as any, vertices, closeShape, handles);
       }
 
-      drawingPointsRef.current       = [];
-      drawingHandlesRef.current      = [];
-      drawingObjectIdRef.current     = null;
-      drawingPreviewPointRef.current = null;
+      drawingPointsRef.current         = [];
+      drawingHandlesRef.current        = [];
+      drawingObjectIdRef.current       = null;
+      drawingStartAnchorIdxRef.current = null;
+      drawingPreviewPointRef.current   = null;
       updatePreview();
-      useStore.getState().setDrawMode(null);
       useStore.getState().saveHistory();
     };
 
@@ -4102,42 +4164,43 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       // ── CASE A: Nothing drawn yet — start from a snap point OR free click ──
       if (drawingPointsRef.current.length === 0) {
         if (snap) {
-          const existObj = projectRef.current.objects.find(o => o.id === snap.objId);
-          if (existObj && existObj.type === 'SHAPE' && !existObj.parameters?.closed && (snap.anchorIdx === 0 || snap.anchorIdx === existObj.vertices.length - 1)) {
-            // Continue from an existing open shape endpoint
-            drawingObjectIdRef.current = snap.objId;
+          // Check if snapping to any vertex of an existing SHAPE (or currently active/selected shape)
+          let targetShape = projectRef.current.objects.find(o => o.id === snap.objId && o.type === 'SHAPE');
+          let targetAnchorIdx = snap.anchorIdx;
 
-            // Los puntos del trazo viven en coordenadas de MUNDO (igual que findSnapEndpoint),
-            // así que se convierte la forma existente aplicando su transformación.
-            const objMat = getShapeMatrix(existObj);
-            const linMat = new THREE.Matrix3().setFromMatrix4(objMat);
-            const verts = existObj.vertices.map(v => new THREE.Vector3(...v).applyMatrix4(objMat));
-            const toWorldDir = (a: [number,number,number]) => {
-              const d = new THREE.Vector3(...a).applyMatrix3(linMat);
-              return [d.x, d.y, d.z] as [number,number,number];
-            };
-            const handles: BezierHandle[] = existObj.bezierHandles
-              ? existObj.bezierHandles.map(h => ({ out: toWorldDir(h.out as any), in: toWorldDir(h.in as any), broken: h.broken }))
-              : existObj.vertices.map(() => ({ out: [0,0,0] as [number,number,number], in: [0,0,0] as [number,number,number], broken: false }));
-            lockDrawPlaneFromPoints(verts);
+          if (!targetShape && selectedObjectId) {
+            const selObj = projectRef.current.objects.find(o => o.id === selectedObjectId && o.type === 'SHAPE');
+            if (selObj && selObj.vertices && selObj.vertices.length > 0) {
+              const objMat = getShapeMatrix(selObj);
+              const matchIdx = selObj.vertices.findIndex((v, i) => {
+                const off = selObj.vertexOffsets?.[i] ?? [0, 0, 0];
+                const world = new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(objMat);
+                return world.distanceTo(snap.worldPos) < 0.25;
+              });
+              if (matchIdx >= 0) {
+                targetShape = selObj;
+                targetAnchorIdx = matchIdx;
+              }
+            }
+          }
 
-            if (snap.anchorIdx === 0) {
-              // Clicked start → reverse so we draw from the tail
-              drawingPointsRef.current  = [...verts].reverse();
-              drawingHandlesRef.current = [...handles].reverse().map(h => ({
-                out: [...h.in]  as [number,number,number],
-                in:  [...h.out] as [number,number,number],
-                broken: h.broken,
-              }));
-            } else {
-              drawingPointsRef.current  = verts;
-              drawingHandlesRef.current = handles;
+          if (targetShape && targetShape.vertices && targetShape.vertices.length > 0) {
+            // Start a new line dependent on this existing shape!
+            drawingObjectIdRef.current = targetShape.id;
+            drawingStartAnchorIdxRef.current = targetAnchorIdx;
+            drawingPointsRef.current = [snap.worldPos.clone()];
+            drawingHandlesRef.current = [{ out: [0,0,0], in: [0,0,0], broken: false }];
+            lockDrawPlaneAtPoint(e, snap.worldPos);
+            if (drawMode === 'bezier') {
+              isDrawingHandleRef.current = true;
+              try { (e.target as Element).setPointerCapture(e.pointerId); } catch {}
             }
             schedulePreviewUpdate();
             return;
           } else {
-            // Start drawing a new stroke with its first point EXACTLY at the snapped reference vertex!
+            // Snapped to a non-shape object (cube/mesh) -> start a new shape
             drawingObjectIdRef.current = null;
+            drawingStartAnchorIdxRef.current = null;
             drawingPointsRef.current = [snap.worldPos.clone()];
             drawingHandlesRef.current = [{ out: [0,0,0], in: [0,0,0], broken: false }];
             lockDrawPlaneAtPoint(e, snap.worldPos);
@@ -4152,13 +4215,13 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
         // Free first point
         drawingObjectIdRef.current = null;
+        drawingStartAnchorIdxRef.current = null;
         const point = getPoint(e);
         if (!point) return;
         drawingPointsRef.current.push(point);
         drawingHandlesRef.current.push({ out: [0,0,0], in: [0,0,0], broken: false });
         if (drawMode === 'bezier') {
           isDrawingHandleRef.current = true;
-          // Capture pointer: mousemove keeps firing even outside the canvas
           try { (e.target as Element).setPointerCapture(e.pointerId); } catch {}
         }
         schedulePreviewUpdate();
@@ -4211,6 +4274,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     };
 
     const onPointerMove = (e: PointerEvent) => {
+      // If user is rotating or panning with RMB (button 2) or MMB (button 4), let OrbitControls handle it smoothly
+      if ((e.buttons & 2) !== 0 || (e.buttons & 4) !== 0) {
+        return;
+      }
+
       // ── SILUETA mode ──────────────────────────────────────────────────────
       const isSiluetaActive = !!(silueta.activePlane && 
         silueta.activePlane.toUpperCase() === type.toUpperCase()
@@ -4258,7 +4326,6 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       }
 
       if (!drawMode) return;
-      e.stopPropagation();
 
       // Show snap-to-endpoint highlight, or plain cursor position
       const snap = findSnapEndpoint(e.clientX, e.clientY, 22);
@@ -4274,6 +4341,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     };
 
     const onPointerUp = (_e: PointerEvent) => {
+      if (_e.button !== 0) return;
+
       // ── SILUETA mode ──────────────────────────────────────────────────────
       if (gizmoStateRef.current.activeAxis === 'FREE') {
         _e.stopPropagation();
@@ -4287,7 +4356,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           const isSiluetaActiveInThisViewport = !!(silueta.activePlane && 
             silueta.activePlane.toUpperCase() === type.toUpperCase()
           );
-          controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport;
+          controlsRef.current.enabled = !isSiluetaActiveInThisViewport && !moveReferenceMode;
         }
         return;
       }
@@ -5430,6 +5499,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     };
 
     const handleMouseMove = (event: PointerEvent) => {
+      if (drawMode) return;
+
       // ── Reference Image drag ──────────────────────────────────────────────
       if (refDragRef.current) {
         const { viewKey, startPos, startMouse } = refDragRef.current;
@@ -7063,7 +7134,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           const isSiluetaActiveInThisViewport = !!(silueta.activePlane && 
             silueta.activePlane.toUpperCase() === type.toUpperCase()
           );
-          controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
+          controlsRef.current.enabled = !isSiluetaActiveInThisViewport && !moveReferenceMode;
         }
         event.stopPropagation();
         return;
@@ -7079,7 +7150,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           const isSiluetaActiveInThisViewport = !!(silueta.activePlane && 
             silueta.activePlane.toUpperCase() === type.toUpperCase()
           );
-          controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
+          controlsRef.current.enabled = !isSiluetaActiveInThisViewport && !moveReferenceMode;
         }
         return;
       }
@@ -7092,7 +7163,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           const isSiluetaActiveInThisViewport = !!(silueta.activePlane && 
             silueta.activePlane.toUpperCase() === type.toUpperCase()
           );
-          controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
+          controlsRef.current.enabled = !isSiluetaActiveInThisViewport && !moveReferenceMode;
         }
         event.stopPropagation();
         return;
@@ -7105,7 +7176,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           const isSiluetaActiveInThisViewport = !!(silueta.activePlane && 
             silueta.activePlane.toUpperCase() === type.toUpperCase()
           );
-          controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
+          controlsRef.current.enabled = !isSiluetaActiveInThisViewport && !moveReferenceMode;
         }
         event.stopPropagation();
         return;
@@ -7572,7 +7643,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         const isSiluetaActiveInThisViewport = !!(silueta.activePlane && 
           silueta.activePlane.toUpperCase() === type.toUpperCase()
         );
-        controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport && !moveReferenceMode;
+        controlsRef.current.enabled = !isSiluetaActiveInThisViewport && !moveReferenceMode;
       }
       if (isDraggingLatheAxisRef.current) {
         isDraggingLatheAxisRef.current = false;
@@ -7588,14 +7659,23 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       const tag = (event.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
 
-      // ── Escape to cancel/exit drawing, insert vertex mode or clear selection ──
+      // ── Escape to finish/exit drawing, insert vertex mode or clear selection ──
       if (event.key === 'Escape') {
         event.preventDefault();
+        event.stopPropagation();
         if (drawMode) {
+          if (drawingPointsRef.current.length >= 2) {
+            // Commit and finish what was drawn without losing the work
+            finishStrokeRef.current?.(null);
+          } else {
+            drawingPointsRef.current = [];
+            drawingHandlesRef.current = [];
+            drawingObjectIdRef.current = null;
+            drawingStartAnchorIdxRef.current = null;
+            drawingPreviewPointRef.current = null;
+            if (updatePreviewRef.current) updatePreviewRef.current();
+          }
           useStore.getState().setDrawMode(null);
-          drawingPointsRef.current = [];
-          drawingHandlesRef.current = [];
-          if (updatePreviewRef.current) updatePreviewRef.current();
           return;
         }
         if (insertVertexMode) {
@@ -7840,9 +7920,14 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       }
 
       // Global F shortcut for objects without faces / shapes
-      if (editMode === 'OBJECT' && selectedObjectId && (event.key === 'f' || event.key === 'F') && !event.ctrlKey) {
+      if (editMode === 'OBJECT' && (selectedObjectId || (selectedObjectIds && selectedObjectIds.length > 0)) && (event.key === 'f' || event.key === 'F') && !event.ctrlKey) {
         event.preventDefault();
-        useStore.getState().createFaceFromVertices(selectedObjectId);
+        const targets = selectedObjectIds && selectedObjectIds.length > 0
+          ? selectedObjectIds
+          : (selectedObjectId ? [selectedObjectId] : []);
+        targets.forEach(id => {
+          useStore.getState().createFaceFromVertices(id);
+        });
         return;
       }
 

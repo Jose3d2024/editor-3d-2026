@@ -1686,7 +1686,6 @@ export const useStore = create<Store>()((set, get) => ({
     set({
       project: { ...state.project, objects: [...state.project.objects, newObj] },
       selectedObjectId: newObj.id, selectedObjectIds: [newObj.id],
-      drawMode: null,
     });
     get().saveHistory();
   },
@@ -5148,88 +5147,109 @@ export const useStore = create<Store>()((set, get) => ({
     newObj.parameters = { ...newObj.parameters, shapeType: undefined };
     newObj.faces = newObj.faces || [];
 
-    // 1. Calcular centroide de los vértices seleccionados
-    const centroid = new THREE.Vector3();
-    sel.forEach(idx => {
-      const v = newObj.vertices[idx];
-      if (v) centroid.add(new THREE.Vector3(v[0], v[1], v[2]));
-    });
-    centroid.divideScalar(sel.length);
-
-    // 2. Calcular la normal del plano óptimo (Newell's Normal / Best-fit plane)
-    let normal = new THREE.Vector3();
-    for (let i = 0; i < sel.length; i++) {
-      const currIdx = sel[i];
-      const nextIdx = sel[(i + 1) % sel.length];
-      const c = newObj.vertices[currIdx];
-      const n = newObj.vertices[nextIdx];
-      if (c && n) {
-        normal.x += (c[1] - n[1]) * (c[2] + n[2]);
-        normal.y += (c[2] - n[2]) * (c[0] + n[0]);
-        normal.z += (c[0] - n[0]) * (c[1] + n[1]);
-      }
-    }
-
-    if (normal.lengthSq() < 1e-6 && sel.length >= 3) {
-      // Fallback si los vértices se seleccionaron en orden no cíclico
-      const v0 = new THREE.Vector3(...newObj.vertices[sel[0]]);
-      const v1 = new THREE.Vector3(...newObj.vertices[sel[1]]);
-      const v2 = new THREE.Vector3(...newObj.vertices[sel[2]]);
-      normal = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
-    }
-
-    if (normal.lengthSq() > 1e-6) {
-      normal.normalize();
-    } else {
-      normal.set(0, 1, 0);
-    }
-
-    // 3. Proyección coplanar automática para eliminar distorsiones y sombreados extraños
-    // Ajusta sutilmente los vértices al plano promedio del centroide
-    let adjustedCount = 0;
-    sel.forEach(idx => {
-      const v = newObj.vertices[idx];
-      if (!v) return;
-      const pt = new THREE.Vector3(v[0], v[1], v[2]);
-      const distToPlane = pt.clone().sub(centroid).dot(normal);
-      if (Math.abs(distToPlane) > 1e-4) {
-        pt.sub(normal.clone().multiplyScalar(distToPlane));
-        newObj.vertices[idx] = [pt.x, pt.y, pt.z];
-        adjustedCount++;
-      }
-    });
-
-    // 4. Ordenamiento angular cíclico respecto al centroide (evita polígonos cruzados o forma de mariposa)
-    let sortedIndices = [...sel];
-    if (sel.length >= 4) {
-      // Crear base ortonormal en el plano
-      const uAxis = new THREE.Vector3();
-      if (Math.abs(normal.x) < 0.9 && Math.abs(normal.y) < 0.9) {
-        uAxis.set(0, 0, 1).cross(normal).normalize();
-      } else {
-        uAxis.set(1, 0, 0).cross(normal).normalize();
-      }
-      const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
-
-      const angles = sel.map(idx => {
+    // Helper: generar cara para un conjunto de índices de vértices coplanares
+    const addFaceForIndices = (indices: number[]) => {
+      if (indices.length < 3) return;
+      const centroid = new THREE.Vector3();
+      indices.forEach(idx => {
         const v = newObj.vertices[idx];
-        const vec = new THREE.Vector3(v[0], v[1], v[2]).sub(centroid);
-        const x = vec.dot(uAxis);
-        const y = vec.dot(vAxis);
-        return { idx, angle: Math.atan2(y, x) };
+        if (v) centroid.add(new THREE.Vector3(v[0], v[1], v[2]));
+      });
+      centroid.divideScalar(indices.length);
+
+      let normal = new THREE.Vector3();
+      for (let i = 0; i < indices.length; i++) {
+        const currIdx = indices[i];
+        const nextIdx = indices[(i + 1) % indices.length];
+        const c = newObj.vertices[currIdx];
+        const n = newObj.vertices[nextIdx];
+        if (c && n) {
+          normal.x += (c[1] - n[1]) * (c[2] + n[2]);
+          normal.y += (c[2] - n[2]) * (c[0] + n[0]);
+          normal.z += (c[0] - n[0]) * (c[1] + n[1]);
+        }
+      }
+      if (normal.lengthSq() < 1e-6 && indices.length >= 3) {
+        const v0 = new THREE.Vector3(...newObj.vertices[indices[0]]);
+        const v1 = new THREE.Vector3(...newObj.vertices[indices[1]]);
+        const v2 = new THREE.Vector3(...newObj.vertices[indices[2]]);
+        normal = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
+      }
+      if (normal.lengthSq() > 1e-6) normal.normalize();
+      else normal.set(0, 1, 0);
+
+      // Ordenamiento angular alrededor del centroide
+      let sorted = [...indices];
+      if (indices.length >= 4) {
+        const uAxis = new THREE.Vector3();
+        if (Math.abs(normal.x) < 0.9 && Math.abs(normal.y) < 0.9) {
+          uAxis.set(0, 0, 1).cross(normal).normalize();
+        } else {
+          uAxis.set(1, 0, 0).cross(normal).normalize();
+        }
+        const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+
+        const angles = indices.map(idx => {
+          const v = newObj.vertices[idx];
+          const vec = new THREE.Vector3(v[0], v[1], v[2]).sub(centroid);
+          return { idx, angle: Math.atan2(vec.dot(vAxis), vec.dot(uAxis)) };
+        });
+        angles.sort((a, b) => a.angle - b.angle);
+        sorted = angles.map(a => a.idx);
+      }
+
+      newObj.faces.push({ indices: sorted });
+    };
+
+    // Si el objeto tiene aristas explícitas y no se especificó un subconjunto restringido,
+    // detectamos todas las islas / bucles cerrados independientes
+    if (!vertexIndices && newObj.edges && newObj.edges.length >= 3) {
+      const adj = new Map<number, Set<number>>();
+      newObj.edges.forEach(([u, v]) => {
+        if (u === v) return;
+        if (!adj.has(u)) adj.set(u, new Set());
+        if (!adj.has(v)) adj.set(v, new Set());
+        adj.get(u)!.add(v);
+        adj.get(v)!.add(u);
       });
 
-      angles.sort((a, b) => a.angle - b.angle);
-      sortedIndices = angles.map(a => a.idx);
+      const visited = new Set<number>();
+      const components: number[][] = [];
+      for (const node of adj.keys()) {
+        if (visited.has(node)) continue;
+        const comp: number[] = [];
+        const queue = [node];
+        visited.add(node);
+        while (queue.length > 0) {
+          const curr = queue.shift()!;
+          comp.push(curr);
+          const neighbors = adj.get(curr) || new Set();
+          for (const n of neighbors) {
+            if (!visited.has(n)) {
+              visited.add(n);
+              queue.push(n);
+            }
+          }
+        }
+        if (comp.length >= 3) {
+          components.push(comp);
+        }
+      }
+
+      if (components.length > 0) {
+        components.forEach(comp => addFaceForIndices(comp));
+      } else {
+        addFaceForIndices(sel);
+      }
+    } else {
+      addFaceForIndices(sel);
     }
 
-    newObj.faces.push({ indices: sortedIndices });
     get().updateObject(id, newObj);
     get().saveHistory();
 
-    const tipoCara = sortedIndices.length === 3 ? 'Triángulo (Tri)' : sortedIndices.length === 4 ? 'Cuadrilátero (Quad)' : `Polígono de ${sortedIndices.length} lados (N-gon)`;
-    const coplanarNote = adjustedCount > 0 ? ' con optimización coplanar aplicada' : ' perfectamente plano';
-    return { success: true, message: `Cara ${tipoCara} generada exitosamente${coplanarNote}.` };
+    const caraCount = newObj.faces.length;
+    return { success: true, message: `${caraCount} cara(s) generada(s) exitosamente.` };
   },
 
   extrudeSelectedVertices: (id: string, vertexIndices?: number[], offset?: V3) => {

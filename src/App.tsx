@@ -51,8 +51,7 @@ export default function App() {
       }
       if (e.key === 'Escape') {
         const state = useStore.getState();
-        if (state.drawMode) state.setDrawMode(null);
-        if (state.insertVertexMode) state.toggleInsertVertexMode(false);
+        if (!state.drawMode && state.insertVertexMode) state.toggleInsertVertexMode(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
