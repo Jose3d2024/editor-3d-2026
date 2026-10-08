@@ -15,9 +15,12 @@ import {
   AlertCircle,
   Camera,
   Image as ImageIcon,
-  RotateCw
+  RotateCw,
+  ShieldCheck,
+  RefreshCw
 } from 'lucide-react';
 import { captureViewportSnapshot, downloadViewportSnapshot } from '../utils/viewportCapture';
+import { getTempBackup, saveTempBackup, restoreTempBackup, downloadBackupFile, TempBackupData } from '../utils/autoBackup';
 
 export interface SavedSceneItem {
   id: string;
@@ -147,8 +150,9 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
   const [thumbnailPreview, setThumbnailPreview] = useState<string | null>(null);
   const [savedScenes, setSavedScenes] = useState<SavedSceneItem[]>([]);
   const [selectedScene, setSelectedScene] = useState<SavedSceneItem | null>(null);
-  const [activeTab, setActiveTab] = useState<'save' | 'library'>(mode === 'open' ? 'library' : 'save');
+  const [activeTab, setActiveTab] = useState<'save' | 'library' | 'autobackup'>(mode === 'open' ? 'library' : 'save');
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [tempBackup, setTempBackup] = useState<TempBackupData | null>(null);
 
   const usedMaterialIds = React.useMemo(() => {
     const ids = new Set<string>();
@@ -259,16 +263,18 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div className="flex items-center gap-3">
             <div className="p-2.5 rounded-xl bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-              {activeTab === 'save' ? <Save size={20} /> : <FolderOpen size={20} />}
+              {activeTab === 'save' ? <Save size={20} /> : activeTab === 'library' ? <FolderOpen size={20} /> : <ShieldCheck size={20} className="text-emerald-400" />}
             </div>
             <div>
               <h3 className="text-base font-bold text-white tracking-wide">
-                {activeTab === 'save' ? (mode === 'save_as' ? 'Guardar Escena Como...' : 'Guardar Escena') : 'Biblioteca de Escenas'}
+                {activeTab === 'save' ? (mode === 'save_as' ? 'Guardar Escena Como...' : 'Guardar Escena') : activeTab === 'library' ? 'Biblioteca de Escenas' : 'Copia de Seguridad Temporal'}
               </h3>
               <p className="text-[11px] text-zinc-400">
                 {activeTab === 'save'
                   ? 'Guarda y sobreescribe tu escena con miniatura del visor en la memoria local.'
-                  : 'Carga proyectos guardados previamente en tu navegador.'}
+                  : activeTab === 'library'
+                  ? 'Carga proyectos guardados previamente en tu navegador.'
+                  : 'Copia automática de seguridad cada 1.5 minutos (90 seg) en un archivo temporal aislado.'}
               </p>
             </div>
           </div>
@@ -304,6 +310,20 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
           >
             <FolderOpen size={13} />
             <span>Mis Escenas ({savedScenes.length})</span>
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setActiveTab('autobackup');
+              const b = await getTempBackup();
+              setTempBackup(b);
+            }}
+            className={`flex-1 py-1.5 rounded-lg font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'autobackup' ? 'bg-emerald-600 text-white shadow-sm' : 'text-emerald-400/80 hover:text-emerald-300'
+            }`}
+          >
+            <ShieldCheck size={13} />
+            <span>Copia Temporal (1:30 min)</span>
           </button>
         </div>
 
@@ -631,6 +651,136 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end pt-2 border-t border-zinc-800">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Tab Content: Autobackup */}
+        {activeTab === 'autobackup' && (
+          <div className="space-y-4 pt-1">
+            <div className="p-3.5 bg-emerald-950/30 border border-emerald-500/30 rounded-xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                  <ShieldCheck size={14} className="text-emerald-400" />
+                  <span>Copia de Seguridad Automática Activa</span>
+                </span>
+                <span className="text-[10px] bg-emerald-950/80 text-emerald-300 border border-emerald-600/40 px-2 py-0.5 rounded-full font-mono font-bold">
+                  Cada 1:30 min
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-300 leading-relaxed">
+                El sistema realiza un respaldo automático en segundo plano cada <strong>90 segundos (1 minuto y medio)</strong> en un archivo temporal aislado, <strong>sin sobreescribir nunca el archivo de tu proyecto guardado</strong>.
+              </p>
+            </div>
+
+            {/* Current temp backup status */}
+            <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2">
+                <span className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
+                  <HardDrive size={13} className="text-indigo-400" />
+                  <span>Estado del Respaldo Temporal</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const b = await saveTempBackup(project);
+                    setTempBackup(b);
+                    setFeedback(`Copia de seguridad temporal actualizada ahora mismo (${b.dateStr}).`);
+                  }}
+                  className="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 rounded-lg text-[10.5px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                >
+                  <RefreshCw size={11} />
+                  <span>Guardar Copia Ahora</span>
+                </button>
+              </div>
+
+              {tempBackup ? (
+                <div className="space-y-2 text-xs">
+                  <div className="grid grid-cols-2 gap-2 bg-zinc-900/60 p-2.5 rounded-lg font-mono text-[11px] border border-zinc-800/60">
+                    <div>
+                      <span className="text-zinc-500 block text-[9.5px]">Última Copia:</span>
+                      <span className="text-zinc-200 font-bold">{tempBackup.dateStr}</span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 block text-[9.5px]">Proyecto Base:</span>
+                      <span className="text-indigo-300 font-bold truncate block">{tempBackup.projectName}</span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 block text-[9.5px]">Objetos en Escena:</span>
+                      <span className="text-zinc-200 font-bold">{tempBackup.objectCount} objetos</span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 block text-[9.5px]">Geometría:</span>
+                      <span className="text-zinc-200 font-bold">{tempBackup.vertCount.toLocaleString()} vértices</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ok = await restoreTempBackup();
+                        if (ok) {
+                          if (onSuccessNotification) onSuccessNotification('Copia temporal de seguridad restaurada en la escena.');
+                          onClose();
+                        } else {
+                          setFeedback('No se pudo restaurar la copia temporal.');
+                        }
+                      }}
+                      className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCw size={13} />
+                      <span>Restaurar Copia Temporal en el Visor</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadBackupFile(tempBackup)}
+                      title="Descargar archivo .3dproj de respaldo"
+                      className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Download size={13} />
+                      <span>Descargar (.3dproj)</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="py-4 text-center text-zinc-500 text-xs">
+                  Aún no se ha generado la primera copia temporal. Se guardará automáticamente en breve o haz clic en "Guardar Copia Ahora".
+                </div>
+              )}
+            </div>
+
+            {/* Format explanation box */}
+            <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl p-3 space-y-1.5 text-[11px] text-zinc-400">
+              <div className="font-bold text-zinc-300 flex items-center gap-1.5 text-xs">
+                <FileText size={13} className="text-indigo-400" />
+                <span>Formatos y Extensiones de Guardado 3D:</span>
+              </div>
+              <ul className="space-y-1 pl-4 list-disc text-[10.5px]">
+                <li>
+                  <strong className="text-indigo-300 font-mono">.3dproj (o .json)</strong>: Guarda <strong>toda la información de la escena al 100%</strong> (mallas, quads nativos, curvas Bézier/NURBS, transformaciones, jerarquías de grupos, materiales PBR, luces, cámaras y keyframes de animación).
+                </li>
+                <li>
+                  <strong className="text-cyan-300 font-mono">.glb / .obj / .stl</strong>: Formatos estándar de intercambio geométrico para exportar a Blender, Unreal, Unity o impresión 3D.
+                </li>
+              </ul>
+            </div>
+
+            {feedback && (
+              <div className="p-2.5 rounded-lg bg-indigo-950/60 border border-indigo-700/50 text-indigo-300 text-xs flex items-center gap-2">
+                <AlertCircle size={14} className="shrink-0" />
+                <span>{feedback}</span>
               </div>
             )}
 

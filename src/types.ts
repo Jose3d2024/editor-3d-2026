@@ -519,6 +519,7 @@ export interface CSGObject {
   silhouetteOnly?: boolean;
   creaseAngle?: number;
   showWireframe?: boolean;
+  isRetopoMesh?:    boolean;
   wireframeColor?: string;
   originalColor?: string;
 
@@ -689,7 +690,7 @@ export interface ViewportConfigState {
 export type EditMode       = 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE';
 export type TransformMode  = 'translate' | 'rotate' | 'scale' | 'universal';
 export type TransformSpace = 'world' | 'local';
-export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED' | 'TEXTURED_WIREFRAME' | 'FACES_VERTICES' | 'BLUEPRINT';
+export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED' | 'TEXTURED_WIREFRAME' | 'FACES_VERTICES' | 'BLUEPRINT' | 'RETOPO_OVERLAY';
 
 export interface HistoryStep {
   id: string;
@@ -787,8 +788,9 @@ export interface AppState {
   editMode:       EditMode;
   transformMode:  TransformMode;
   transformSpace: TransformSpace;
-  drawMode:       'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline' | null;
+  drawMode:       'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline' | 'retopo' | null;
   drawColor:      string;
+  addRetopoFace?: (targetMeshId: string | null, newVertices: V3[], faceVertexIndices: number[]) => string;
   breakSelectedBezierHandles?: (id: string, vertexIndices?: number[]) => void;
   alignSelectedBezierHandles?: (id: string, vertexIndices?: number[]) => void;
   autoSmoothSelectedBezierHandles?: (id: string, vertexIndices?: number[]) => void;

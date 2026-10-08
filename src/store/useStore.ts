@@ -276,7 +276,8 @@ interface Store extends AppState {
   setEditMode: (mode: 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE') => Promise<void>;
   setTransformMode: (mode: TransformMode) => void;
   setTransformSpace: (space: 'world' | 'local') => void;
-  setDrawMode: (mode: 'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline' | null) => void;
+  setDrawMode: (mode: 'line' | 'rect' | 'bezier' | 'smooth' | 'freehand' | 'polyline' | 'retopo' | null) => void;
+  addRetopoFace: (targetMeshId: string | null, newVertices: V3[], faceVertexIndices: number[]) => string;
   setDrawColor: (color: string) => void;
   setActiveViewport: (viewport: ViewportType) => void;
   setSelectedVertexIndices: (indices: number[]) => void;
@@ -1707,6 +1708,76 @@ export const useStore = create<Store>()((set, get) => ({
       return { ...o, vertices: updatedVerts, bezierHandles: smoothed };
     })}});
     get().saveHistory();
+  },
+
+  // ── addRetopoFace: create or append a face to a Retopology MESH object ────
+  addRetopoFace: (targetMeshId: string | null, newVertices: V3[], faceVertexIndices: number[]) => {
+    const state = get();
+    let mesh = targetMeshId ? state.project.objects.find(o => o.id === targetMeshId) : null;
+
+    if (!mesh) {
+      const count = state.project.objects.filter(o => o.name.startsWith('Retopología')).length + 1;
+      const initialEdges: [number, number][] = [];
+      for (let i = 0; i < faceVertexIndices.length; i++) {
+        initialEdges.push([faceVertexIndices[i], faceVertexIndices[(i + 1) % faceVertexIndices.length]]);
+      }
+
+      const newMesh: CSGObject = {
+        id: genId(),
+        name: `Retopología ${count}`,
+        type: 'MESH',
+        operation: 'ADD',
+        transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        parameters: {},
+        vertices: newVertices,
+        faces: [{ indices: faceVertexIndices }],
+        edges: initialEdges,
+        color: '#06b6d4',
+        opacity: 0.92,
+        isRetopoMesh: true,
+        visible: true,
+        keyframes: [],
+      };
+
+      set({
+        project: { ...state.project, objects: [...state.project.objects, newMesh] },
+        selectedObjectId: newMesh.id,
+        selectedObjectIds: [newMesh.id],
+      });
+      get().saveHistory('Crear cara de retopología', 'retopo');
+      return newMesh.id;
+    } else {
+      const updatedVerts = [...mesh.vertices, ...newVertices];
+      const updatedFaces = [...(mesh.faces || []), { indices: faceVertexIndices }];
+
+      const edgeSet = new Set((mesh.edges || []).map(([a, b]) => `${Math.min(a, b)}_${Math.max(a, b)}`));
+      const mergedEdges = [...(mesh.edges || [])];
+      for (let i = 0; i < faceVertexIndices.length; i++) {
+        const u = faceVertexIndices[i];
+        const v = faceVertexIndices[(i + 1) % faceVertexIndices.length];
+        const key = `${Math.min(u, v)}_${Math.max(u, v)}`;
+        if (!edgeSet.has(key)) {
+          edgeSet.add(key);
+          mergedEdges.push([u, v]);
+        }
+      }
+
+      set({
+        project: {
+          ...state.project,
+          objects: state.project.objects.map(o => o.id === mesh!.id ? {
+            ...o,
+            vertices: updatedVerts,
+            faces: updatedFaces,
+            edges: mergedEdges,
+          } : o),
+        },
+        selectedObjectId: mesh.id,
+        selectedObjectIds: [mesh.id],
+      });
+      get().saveHistory('Añadir cara de retopología', 'retopo');
+      return mesh.id;
+    }
   },
 
   // ── Update ────────────────────────────────────────────────────────────────
@@ -4077,7 +4148,7 @@ export const useStore = create<Store>()((set, get) => ({
 
       if (obj.meshData && obj.meshData.type === 'gltf' && !options.convertToNative) {
         const { retopologizeGLBModel } = await import('../utils/retopology');
-        updatedObj = await retopologizeGLBModel(
+        const retopoGLBResult = await retopologizeGLBModel(
           obj,
           options,
           (prog, step) => {
@@ -4087,17 +4158,51 @@ export const useStore = create<Store>()((set, get) => ({
           },
           options.selectedMeshes
         );
+
+        const newRetopoGLB: CSGObject = {
+          ...retopoGLBResult,
+          id: `retopo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          name: `Retopología - ${obj.name}`,
+        };
+
+        set({
+          project: {
+            ...get().project,
+            objects: [...get().project.objects, newRetopoGLB]
+          },
+          selectedObjectId: newRetopoGLB.id,
+          selectedObjectIds: [newRetopoGLB.id]
+        });
+
+        const finalVerts = newRetopoGLB.stats?.vertices ?? 0;
+        const finalFaces = newRetopoGLB.stats?.faces ?? 0;
+        const quadsCount = newRetopoGLB.stats?.quads ?? 0;
+        const reduction = initialFaces > 0 ? Math.round(((initialFaces - finalFaces) / initialFaces) * 100) : 0;
+        const polyCount = finalFaces.toLocaleString();
+        get().saveHistory(`Crear ${newRetopoGLB.name} (${polyCount} caras)`, 'retopo');
+
+        set(s => ({
+          meshProcessing: s.meshProcessing ? {
+            ...s.meshProcessing,
+            progress: 100,
+            subtitle: `¡Malla de retopología creada! Conservando figura de referencia '${obj.name}' y nueva malla '${newRetopoGLB.name}' (${polyCount} caras · ${quadsCount.toLocaleString()} quads)`,
+            completed: true,
+            finalVertCount: finalVerts,
+            finalFaceCount: finalFaces,
+          } : null
+        }));
+        return;
       } else {
+        let meshToProcess = obj;
         if (obj.meshData) {
           const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
-          obj = await convertImportedToCSG(obj);
-        }
-        if (!obj.vertices || obj.vertices.length === 0) {
+          meshToProcess = await convertImportedToCSG(obj);
+        } else if (!obj.vertices || obj.vertices.length === 0) {
           const { createBaseGeometry } = await import('../utils/csg');
           const { fromThreeGeometry } = await import('../utils/modifiers');
           const geo = createBaseGeometry(obj);
           const res = fromThreeGeometry(geo);
-          obj = {
+          meshToProcess = {
             ...obj,
             vertices: res.vertices,
             faces: res.faces,
@@ -4105,7 +4210,7 @@ export const useStore = create<Store>()((set, get) => ({
         }
 
         const { retopologizeMesh } = await import('../utils/retopology');
-        const result = await retopologizeMesh(obj, {
+        const result = await retopologizeMesh(meshToProcess, {
           ...options,
           onProgress: (prog, step) => {
             set(s => ({
@@ -4114,18 +4219,43 @@ export const useStore = create<Store>()((set, get) => ({
           }
         });
 
-        updatedObj = {
-          ...obj,
+        // Generar aristas de la nueva malla para visualización clara de cuadriláteros
+        const edgeSet = new Set<string>();
+        const retopoEdges: [number, number][] = [];
+        result.faces.forEach(f => {
+          const idxs = f.indices;
+          if (!idxs) return;
+          const len = idxs.length;
+          for (let i = 0; i < len; i++) {
+            const u = idxs[i], v = idxs[(i + 1) % len];
+            const key = `${Math.min(u, v)}_${Math.max(u, v)}`;
+            if (!edgeSet.has(key)) {
+              edgeSet.add(key);
+              retopoEdges.push([u, v]);
+            }
+          }
+        });
+
+        const newRetopoMesh: CSGObject = {
+          id: `retopo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          name: `Retopología - ${obj.name}`,
           type: 'MESH',
+          operation: 'ADD',
+          transform: { ...obj.transform },
           parameters: {
             ...(obj.parameters || {}),
             creaseAngleDeg: options.creaseAngleDeg || 35
           },
-          meshData: undefined,
           vertices: result.vertices,
           faces: result.faces,
+          edges: retopoEdges,
           vertexOffsets: {},
+          color: '#06b6d4',
+          opacity: 0.92,
+          isRetopoMesh: true,
+          visible: true,
           smoothShading: true,
+          keyframes: [],
           stats: {
             vertices: result.stats.vertices,
             faces: result.stats.finalFaces,
@@ -4134,38 +4264,31 @@ export const useStore = create<Store>()((set, get) => ({
           }
         };
 
+        // Mantener ambas mallas: la figura original de referencia y la nueva malla limpia en el árbol
+        set({
+          project: {
+            ...get().project,
+            objects: [...get().project.objects, newRetopoMesh]
+          },
+          selectedObjectId: newRetopoMesh.id,
+          selectedObjectIds: [newRetopoMesh.id]
+        });
+
+        const modeStr = options.mode === 'PURE_QUADS' ? '100% Quads' : (options.mode === 'QUAD_DOMINANT' ? 'Quads Dominante' : (options.mode === 'ISOTROPIC_TRI' ? 'Isótropo' : 'Retopología'));
+        const polyCount = result.stats.finalFaces.toLocaleString();
+        get().saveHistory(`Crear ${newRetopoMesh.name} (${polyCount} caras)`, 'retopo');
+
         set(s => ({
           meshProcessing: s.meshProcessing ? {
             ...s.meshProcessing,
             progress: 100,
-            subtitle: `¡Remeser completado! ${result.report.join(' · ')}`,
+            subtitle: `¡Malla de retopología creada! Conservando figura de referencia '${obj.name}' y nueva malla '${newRetopoMesh.name}' (${polyCount} caras)`,
             completed: true,
             finalVertCount: result.stats.vertices,
             finalFaceCount: result.stats.finalFaces,
           } : null
         }));
-      }
-
-      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-      const modeStr = options.mode === 'PURE_QUADS' ? '100% Quads' : (options.mode === 'QUAD_DOMINANT' ? 'Quads Dominante' : (options.mode === 'ISOTROPIC_TRI' ? 'Isótropo' : 'Retopología'));
-      const polyCount = (updatedObj.stats?.faces || options.targetCount || (options as any).targetFaces || 5000).toLocaleString();
-      get().saveHistory(`Remeser: ${modeStr} (~${polyCount}p)`, 'retopo');
-
-      if (obj.meshData && obj.meshData.type === 'gltf' && !options.convertToNative) {
-        const finalVerts = updatedObj.stats?.vertices ?? 0;
-        const finalFaces = updatedObj.stats?.faces ?? 0;
-        const quadsCount = updatedObj.stats?.quads ?? 0;
-        const reduction = initialFaces > 0 ? Math.round(((initialFaces - finalFaces) / initialFaces) * 100) : 0;
-        set(s => ({
-          meshProcessing: s.meshProcessing ? {
-            ...s.meshProcessing,
-            progress: 100,
-            subtitle: `¡Remeser completado! ${finalFaces.toLocaleString()} caras (${reduction > 0 ? `-${reduction}%` : ''} · ${quadsCount.toLocaleString()} quads generados) · Texturas y UVs preservadas`,
-            completed: true,
-            finalVertCount: finalVerts,
-            finalFaceCount: finalFaces,
-          } : null
-        }));
+        return;
       }
     } catch (e) {
       console.error('Error en Remeser:', e);
@@ -5150,17 +5273,28 @@ export const useStore = create<Store>()((set, get) => ({
     // Helper: generar cara para un conjunto de índices de vértices coplanares
     const addFaceForIndices = (indices: number[]) => {
       if (indices.length < 3) return;
+      const cleanIndices: number[] = [];
+      for (let i = 0; i < indices.length; i++) {
+        if (cleanIndices.length === 0 || cleanIndices[cleanIndices.length - 1] !== indices[i]) {
+          cleanIndices.push(indices[i]);
+        }
+      }
+      if (cleanIndices.length >= 2 && cleanIndices[0] === cleanIndices[cleanIndices.length - 1]) {
+        cleanIndices.pop();
+      }
+      if (cleanIndices.length < 3) return;
+
       const centroid = new THREE.Vector3();
-      indices.forEach(idx => {
+      cleanIndices.forEach(idx => {
         const v = newObj.vertices[idx];
         if (v) centroid.add(new THREE.Vector3(v[0], v[1], v[2]));
       });
-      centroid.divideScalar(indices.length);
+      centroid.divideScalar(cleanIndices.length);
 
       let normal = new THREE.Vector3();
-      for (let i = 0; i < indices.length; i++) {
-        const currIdx = indices[i];
-        const nextIdx = indices[(i + 1) % indices.length];
+      for (let i = 0; i < cleanIndices.length; i++) {
+        const currIdx = cleanIndices[i];
+        const nextIdx = cleanIndices[(i + 1) % cleanIndices.length];
         const c = newObj.vertices[currIdx];
         const n = newObj.vertices[nextIdx];
         if (c && n) {
@@ -5169,18 +5303,33 @@ export const useStore = create<Store>()((set, get) => ({
           normal.z += (c[0] - n[0]) * (c[1] + n[1]);
         }
       }
-      if (normal.lengthSq() < 1e-6 && indices.length >= 3) {
-        const v0 = new THREE.Vector3(...newObj.vertices[indices[0]]);
-        const v1 = new THREE.Vector3(...newObj.vertices[indices[1]]);
-        const v2 = new THREE.Vector3(...newObj.vertices[indices[2]]);
+      if (normal.lengthSq() < 1e-6 && cleanIndices.length >= 3) {
+        const v0 = new THREE.Vector3(...newObj.vertices[cleanIndices[0]]);
+        const v1 = new THREE.Vector3(...newObj.vertices[cleanIndices[1]]);
+        const v2 = new THREE.Vector3(...newObj.vertices[cleanIndices[2]]);
         normal = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
       }
       if (normal.lengthSq() > 1e-6) normal.normalize();
       else normal.set(0, 1, 0);
 
-      // Ordenamiento angular alrededor del centroide
-      let sorted = [...indices];
-      if (indices.length >= 4) {
+      // Si los vértices no forman un ciclo ordenado por aristas explícitas, ordenamos angularmente
+      let sorted = [...cleanIndices];
+      let isConsecutiveEdges = false;
+      if (newObj.edges && newObj.edges.length > 0) {
+        let validEdgeCount = 0;
+        for (let i = 0; i < cleanIndices.length; i++) {
+          const a = cleanIndices[i];
+          const b = cleanIndices[(i + 1) % cleanIndices.length];
+          if (newObj.edges.some(([u, v]) => (u === a && v === b) || (u === b && v === a))) {
+            validEdgeCount++;
+          }
+        }
+        if (validEdgeCount === cleanIndices.length) {
+          isConsecutiveEdges = true;
+        }
+      }
+
+      if (!isConsecutiveEdges && cleanIndices.length >= 4) {
         const uAxis = new THREE.Vector3();
         if (Math.abs(normal.x) < 0.9 && Math.abs(normal.y) < 0.9) {
           uAxis.set(0, 0, 1).cross(normal).normalize();
@@ -5189,7 +5338,7 @@ export const useStore = create<Store>()((set, get) => ({
         }
         const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
 
-        const angles = indices.map(idx => {
+        const angles = cleanIndices.map(idx => {
           const v = newObj.vertices[idx];
           const vec = new THREE.Vector3(v[0], v[1], v[2]).sub(centroid);
           return { idx, angle: Math.atan2(vec.dot(vAxis), vec.dot(uAxis)) };
@@ -5198,14 +5347,30 @@ export const useStore = create<Store>()((set, get) => ({
         sorted = angles.map(a => a.idx);
       }
 
-      newObj.faces.push({ indices: sorted });
+      // Evitar caras duplicadas
+      const sortedSet = new Set(sorted);
+      const exists = newObj.faces.some(f => {
+        if (f.indices.length !== sorted.length) return false;
+        return f.indices.every(idx => sortedSet.has(idx));
+      });
+      if (!exists) {
+        newObj.faces.push({ indices: sorted });
+      }
     };
 
-    // Si el objeto tiene aristas explícitas y no se especificó un subconjunto restringido,
-    // detectamos todas las islas / bucles cerrados independientes
-    if (!vertexIndices && newObj.edges && newObj.edges.length >= 3) {
+    // Si el objeto tiene aristas o es un conjunto de figuras cerradas, detectamos todos los ciclos / caras independientes
+    let edgesToUse: [number, number][] = (newObj.edges && newObj.edges.length >= 3)
+      ? [...newObj.edges]
+      : [];
+    if (edgesToUse.length === 0 && newObj.vertices.length >= 3) {
+      for (let i = 0; i < newObj.vertices.length; i++) {
+        edgesToUse.push([i, (i + 1) % newObj.vertices.length]);
+      }
+    }
+
+    if (!vertexIndices && edgesToUse.length >= 3) {
       const adj = new Map<number, Set<number>>();
-      newObj.edges.forEach(([u, v]) => {
+      edgesToUse.forEach(([u, v]) => {
         if (u === v) return;
         if (!adj.has(u)) adj.set(u, new Set());
         if (!adj.has(v)) adj.set(v, new Set());
@@ -5213,31 +5378,55 @@ export const useStore = create<Store>()((set, get) => ({
         adj.get(v)!.add(u);
       });
 
-      const visited = new Set<number>();
-      const components: number[][] = [];
-      for (const node of adj.keys()) {
-        if (visited.has(node)) continue;
-        const comp: number[] = [];
-        const queue = [node];
-        visited.add(node);
+      // Búsqueda de ciclos simples/cordales para cada arista (u, v)
+      const detectedCycles: number[][] = [];
+      const cycleSignatures = new Set<string>();
+
+      edgesToUse.forEach(([u, v]) => {
+        // Camino más corto de v a u sin usar la arista directa (u, v)
+        const parent = new Map<number, number>();
+        const visited = new Set<number>();
+        visited.add(v);
+        const queue = [v];
+        let found = false;
+
         while (queue.length > 0) {
           const curr = queue.shift()!;
-          comp.push(curr);
+          if (curr === u) {
+            found = true;
+            break;
+          }
           const neighbors = adj.get(curr) || new Set();
           for (const n of neighbors) {
+            if (curr === v && n === u) continue; // ignorar la arista directa
             if (!visited.has(n)) {
               visited.add(n);
+              parent.set(n, curr);
               queue.push(n);
             }
           }
         }
-        if (comp.length >= 3) {
-          components.push(comp);
-        }
-      }
 
-      if (components.length > 0) {
-        components.forEach(comp => addFaceForIndices(comp));
+        if (found) {
+          const cycle: number[] = [];
+          let curr = u;
+          while (curr !== v && parent.has(curr)) {
+            cycle.push(curr);
+            curr = parent.get(curr)!;
+          }
+          cycle.push(v);
+          if (cycle.length >= 3) {
+            const sig = [...cycle].sort((a, b) => a - b).join('_');
+            if (!cycleSignatures.has(sig)) {
+              cycleSignatures.add(sig);
+              detectedCycles.push(cycle);
+            }
+          }
+        }
+      });
+
+      if (detectedCycles.length > 0) {
+        detectedCycles.forEach(comp => addFaceForIndices(comp));
       } else {
         addFaceForIndices(sel);
       }

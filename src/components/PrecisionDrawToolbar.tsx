@@ -80,7 +80,7 @@ export const PrecisionDrawToolbar: React.FC = () => {
   const showEdgeTools = !drawMode && (editMode === 'EDGE' || selectedEdgeIndices.length > 0) && !!selectedObj;
   const showAnyEditMode = !drawMode && editMode !== 'OBJECT' && !!selectedObj;
 
-  const isVisible = !!drawMode || showVertexTools || showFaceTools || showEdgeTools || showAnyEditMode;
+  const isVisible = (!!drawMode && drawMode !== 'retopo') || showVertexTools || showFaceTools || showEdgeTools || showAnyEditMode;
 
   // Initialize position to top-center if not set
   useEffect(() => {
@@ -161,10 +161,37 @@ export const PrecisionDrawToolbar: React.FC = () => {
       {/* ── DRAWING MODE HUD ── */}
       {drawMode && (
         <>
-          <div className="flex items-center gap-1 text-indigo-300 font-bold text-[10px] pr-1.5 border-r border-white/10">
-            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping"></span>
-            <span>{drawMode === 'bezier' ? 'Curva' : drawMode === 'line' ? 'Línea' : 'Rectángulo'}</span>
+          <div className="flex items-center gap-1.5 text-indigo-300 font-bold text-[10px] pr-2 border-r border-white/10">
+            <span className={`w-1.5 h-1.5 rounded-full ${drawMode === 'retopo' ? 'bg-cyan-400 animate-pulse' : 'bg-indigo-500 animate-ping'}`} />
+            <span>
+              {drawMode === 'retopo' ? 'Retopología' : drawMode === 'bezier' ? 'Curva Bézier' : drawMode === 'smooth' ? 'Curva Suave' : drawMode === 'freehand' ? 'Mano Alzada' : drawMode === 'line' ? 'Línea' : 'Rectángulo'}
+            </span>
           </div>
+
+          {/* Retopo Automática Quick Action */}
+          {drawMode === 'retopo' && selectedObjectId && (
+            <button
+              type="button"
+              onClick={async (e) => {
+                e.stopPropagation();
+                const state = useStore.getState();
+                if (selectedObjectId) {
+                  await state.retopologizeObject(selectedObjectId, {
+                    mode: 'QUAD_DOMINANT',
+                    targetRatio: 0.25,
+                    adaptiveCurvature: true,
+                    preserveCreases: true,
+                    hardSurfaceProtection: true,
+                  });
+                }
+              }}
+              className="px-2 py-0.5 rounded-full text-[9.5px] font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 flex items-center gap-1 transition-all cursor-pointer shadow-xs"
+              title="Ejecutar remallador inteligente automático"
+            >
+              <Sparkles size={11} />
+              <span>⚡ Auto-Retopo</span>
+            </button>
+          )}
 
           {/* Escuadra 90° toggle */}
           <button
@@ -207,10 +234,10 @@ export const PrecisionDrawToolbar: React.FC = () => {
               window.dispatchEvent(new CustomEvent('csg-finish-drawing-stroke', { detail: { close: true } }));
             }}
             className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-full text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all shadow-sm"
-            title="Cerrar y soldar vértices de inicio y fin"
+            title={drawMode === 'retopo' ? 'Cerrar cara poligonal (Enter)' : 'Cerrar y soldar vértices (Enter)'}
           >
             <Link2 size={11} />
-            <span>Cerrar</span>
+            <span>{drawMode === 'retopo' ? 'Cerrar Cara' : 'Cerrar'}</span>
           </button>
 
           {/* Cancel button */}
@@ -221,7 +248,7 @@ export const PrecisionDrawToolbar: React.FC = () => {
               setDrawMode(null);
             }}
             className="p-1 text-zinc-400 hover:text-rose-400 hover:bg-rose-950/40 rounded-full transition-colors cursor-pointer"
-            title="Cancelar dibujo (Esc)"
+            title="Salir del modo dibujo (Esc)"
           >
             <X size={12} />
           </button>

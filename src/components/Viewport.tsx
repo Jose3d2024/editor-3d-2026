@@ -270,7 +270,10 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
   const isFreehandDrawingRef = useRef(false);
   const previewRafIdRef = useRef<number | null>(null);
   const finishStrokeRef = useRef<((snapResult: any) => void) | null>(null);
+  const finishRetopoFaceRef = useRef<(() => void) | null>(null);
   const updatePreviewRef = useRef<(() => void) | null>(null);
+  const retopoTargetMeshIdRef = useRef<string | null>(null);
+  const retopoCurrentPolyRef = useRef<{ pos: THREE.Vector3; snapIdx: number | null }[]>([]);
 
   const gizmoStateRef = useRef<{
     hoveredAxis: string | null;
@@ -386,7 +389,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld))
       .normalize();
     if (normal.dot(raycaster.ray.direction) > 0) normal.negate();
-    return { point: hit.point.clone(), normal };
+    return { point: hit.point.clone(), normal, hitFace: hit.face, hitObject: hit.object };
   };
 
   // Bloquea el plano de trabajo pasando EXACTAMENTE por un punto de mundo (p. ej. un vértice
@@ -485,85 +488,91 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     if (skipSnap) return target;
 
     const p = target.clone();
-    if (gridSnapEnabled) {
-      const gs = 0.1;
+    const isGridSnap = gridSnapEnabled || useStore.getState().gridSnapEnabled;
+    if (isGridSnap) {
+      const gs = 0.5;
       if (type === 'FRONT' || type === 'BACK') {
         p.x = Math.round(p.x / gs) * gs;
         p.y = Math.round(p.y / gs) * gs;
       } else if (type === 'LEFT' || type === 'RIGHT') {
         p.z = Math.round(p.z / gs) * gs;
         p.y = Math.round(p.y / gs) * gs;
-      } else {
+      } else if (type === 'TOP' || type === 'BOTTOM') {
         p.x = Math.round(p.x / gs) * gs;
         p.z = Math.round(p.z / gs) * gs;
+      } else {
+        if (Math.abs(plane.normal.y) > 0.8) {
+          p.x = Math.round(p.x / gs) * gs;
+          p.z = Math.round(p.z / gs) * gs;
+        } else if (Math.abs(plane.normal.z) > 0.8) {
+          p.x = Math.round(p.x / gs) * gs;
+          p.y = Math.round(p.y / gs) * gs;
+        } else if (Math.abs(plane.normal.x) > 0.8) {
+          p.z = Math.round(p.z / gs) * gs;
+          p.y = Math.round(p.y / gs) * gs;
+        } else {
+          p.x = Math.round(p.x / gs) * gs;
+          p.y = Math.round(p.y / gs) * gs;
+          p.z = Math.round(p.z / gs) * gs;
+        }
       }
-      // Mantener el punto sobre el plano de trabajo tras redondear
       if (surfaceAware) plane.projectPoint(p.clone(), p);
     }
 
     const { orthoDrawMode, drawLockAxis } = useStore.getState();
     const isOrtho = !!(e.shiftKey || orthoDrawMode || drawLockAxis === 'ORTHO_90');
 
-    if (drawingPointsRef.current.length > 0) {
-      const last = drawingPointsRef.current[drawingPointsRef.current.length - 1];
+    const prevPoints = drawMode === 'retopo' 
+      ? retopoCurrentPolyRef.current.map(p => p.pos) 
+      : drawingPointsRef.current;
+
+    if (prevPoints.length > 0) {
+      const last = prevPoints[prevPoints.length - 1];
 
       if (drawLockAxis === 'X') {
-        if (type === 'FRONT' || type === 'BACK') {
-          p.y = last.y;
-        } else if (type === 'LEFT' || type === 'RIGHT') {
-          p.z = last.z;
-        } else {
-          p.z = last.z;
-        }
+        p.y = last.y; p.z = last.z;
         (drawingPreviewPointRef as any)._guideAxis = 'X';
       } else if (drawLockAxis === 'Y') {
-        if (type === 'FRONT' || type === 'BACK') {
-          p.x = last.x;
-        } else if (type === 'LEFT' || type === 'RIGHT') {
-          p.z = last.z;
-        } else {
-          // In Top/Bottom Y is plane normal, lock to X
-          p.z = last.z;
-        }
+        p.x = last.x; p.z = last.z;
         (drawingPreviewPointRef as any)._guideAxis = 'Y';
       } else if (drawLockAxis === 'Z') {
-        if (type === 'LEFT' || type === 'RIGHT') {
-          p.y = last.y;
-        } else {
-          p.x = last.x;
-        }
+        p.x = last.x; p.y = last.y;
         (drawingPreviewPointRef as any)._guideAxis = 'Z';
       } else if (isOrtho) {
-        // Escuadra (90° Snap relativo al punto previo)
-        const dx = Math.abs(p.x - last.x);
-        const dy = Math.abs(p.y - last.y);
-        const dz = Math.abs(p.z - last.z);
+        // Escuadra 90° relativa al plano de trabajo y punto previo
+        const diff = p.clone().sub(last);
+        const norm = plane.normal;
 
-        if (type === 'FRONT' || type === 'BACK') {
-          if (dx > dy) {
-            p.y = last.y;
-            (drawingPreviewPointRef as any)._guideAxis = 'X';
-          } else {
-            p.x = last.x;
-            (drawingPreviewPointRef as any)._guideAxis = 'Y';
-          }
-        } else if (type === 'LEFT' || type === 'RIGHT') {
-          if (dz > dy) {
-            p.y = last.y;
-            (drawingPreviewPointRef as any)._guideAxis = 'Z';
-          } else {
-            p.z = last.z;
-            (drawingPreviewPointRef as any)._guideAxis = 'Y';
-          }
+        let axisU = new THREE.Vector3();
+        let axisV = new THREE.Vector3();
+
+        if (Math.abs(norm.y) > 0.8) {
+          axisU.set(1, 0, 0);
+          axisV.set(0, 0, 1);
+        } else if (Math.abs(norm.z) > 0.8) {
+          axisU.set(1, 0, 0);
+          axisV.set(0, 1, 0);
+        } else if (Math.abs(norm.x) > 0.8) {
+          axisU.set(0, 0, 1);
+          axisV.set(0, 1, 0);
         } else {
-          // TOP / BOTTOM / PERSPECTIVE
-          if (dx > dz) {
-            p.z = last.z;
-            (drawingPreviewPointRef as any)._guideAxis = 'X';
+          if (Math.abs(norm.x) < 0.9 && Math.abs(norm.y) < 0.9) {
+            axisU.set(0, 0, 1).cross(norm).normalize();
           } else {
-            p.x = last.x;
-            (drawingPreviewPointRef as any)._guideAxis = 'Z';
+            axisU.set(1, 0, 0).cross(norm).normalize();
           }
+          axisV.crossVectors(norm, axisU).normalize();
+        }
+
+        const projU = diff.dot(axisU);
+        const projV = diff.dot(axisV);
+
+        if (Math.abs(projU) >= Math.abs(projV)) {
+          p.copy(last).add(axisU.clone().multiplyScalar(projU));
+          (drawingPreviewPointRef as any)._guideAxis = axisU.x !== 0 ? 'X' : (axisU.y !== 0 ? 'Y' : 'Z');
+        } else {
+          p.copy(last).add(axisV.clone().multiplyScalar(projV));
+          (drawingPreviewPointRef as any)._guideAxis = axisV.x !== 0 ? 'X' : (axisV.y !== 0 ? 'Y' : 'Z');
         }
       } else {
         (drawingPreviewPointRef as any)._guideAxis = null;
@@ -2159,8 +2168,27 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             const rawBaseMaterials = mesh.userData.initialBaseMaterials || mesh.material;
 
             const isBlueprintActive = viewMode === 'BLUEPRINT';
+            const isRetopoActive = viewMode === 'RETOPO_OVERLAY';
+            const isRetopoObj = Boolean(
+              obj.isRetopoMesh ||
+              (obj.name && obj.name.toLowerCase().includes('retopo')) ||
+              (obj.id && obj.id.startsWith('retopo-')) ||
+              obj.id === retopoTargetMeshIdRef.current
+            );
 
-            if (isBlueprintActive) {
+            if (isRetopoActive && !isRetopoObj) {
+              // Objeto de referencia en modo Retopo: superficie fantasma/translúcida neutral
+              const ghostMat = new THREE.MeshStandardMaterial({
+                color: 0x1e293b,
+                roughness: 0.9,
+                metalness: 0.1,
+                transparent: true,
+                opacity: 0.16,
+                depthWrite: false,
+                side: THREE.DoubleSide,
+              });
+              mesh.material = ghostMat;
+            } else if (isBlueprintActive) {
               const blueprintMat = new THREE.MeshStandardMaterial({
                 color: 0x091b33, // High-contrast technical blueprint navy
                 roughness: 0.85,
@@ -2243,16 +2271,18 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               mesh.visible = true;
             }
 
-            // If TEXTURED_WIREFRAME, WIREFRAME, isBlueprintActive, or showWireframe: add clean topology edge overlay
-            const shouldShowWire = viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'WIREFRAME' || isBlueprintActive || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
+            // If TEXTURED_WIREFRAME, WIREFRAME, isBlueprintActive, RETOPO_OVERLAY (on ref mesh), or showWireframe: add clean topology edge overlay
+            const shouldShowWire = viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'WIREFRAME' || isBlueprintActive || (isRetopoActive && !isRetopoObj) || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
             if (shouldShowWire) {
               const isSkinned = !!(mesh as any).isSkinnedMesh;
               const isWireOnly = viewMode === 'WIREFRAME';
               const wireColor = isBlueprintActive
                 ? 0x00f0ff // Glowing cyan technical blueprint lines
-                : (isWireOnly
-                    ? (isSelected ? 0x4f8ef7 : 0x22dd44)
-                    : (isSelected ? 0x38bdf8 : 0x0284c7));
+                : (isRetopoActive && !isRetopoObj)
+                  ? (isSelected ? 0x38bdf8 : 0x64748b)
+                  : (isWireOnly
+                      ? (isSelected ? 0x4f8ef7 : 0x22dd44)
+                      : (isSelected ? 0x38bdf8 : 0x0284c7));
 
               if (isSkinned) {
                 // MODELO ARTICULADO CON ESQUELETO Y HUESOS (ej. AT-AT Walker):
@@ -2860,6 +2890,13 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
       const isSelected = (selectedObjectIds ?? [selectedObjectId]).includes(obj.id);
       const isBlueprintActive = viewMode === 'BLUEPRINT';
+      const isRetopoActive = viewMode === 'RETOPO_OVERLAY';
+      const isRetopoObj = Boolean(
+        obj.isRetopoMesh ||
+        (obj.name && obj.name.toLowerCase().includes('retopo')) ||
+        (obj.id && obj.id.startsWith('retopo-')) ||
+        obj.id === retopoTargetMeshIdRef.current
+      );
       const isGpgpu = obj.type === 'GPGPU_SWARM' || obj.isGpgpuSwarm || obj.parameters?.isGpgpuSwarm;
       const isParticle = obj.type === 'PARTICLE_SYSTEM' || obj.isParticleSystem || obj.parameters?.isParticleSystem;
 
@@ -2919,7 +2956,34 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             : (obj.material || {})) as any;
 
           let finalMaterial: THREE.Material | THREE.Material[];
-          if (isBlueprintActive) {
+          if (isRetopoActive) {
+            if (isRetopoObj) {
+              // Malla de Retopología: Sólido vibrante con relieve para visualización perfecta
+              finalMaterial = new THREE.MeshStandardMaterial({
+                color: obj.color ? (obj.color === '#ffffff' ? 0x06b6d4 : new THREE.Color(obj.color).getHex()) : 0x06b6d4,
+                roughness: 0.35,
+                metalness: 0.05,
+                transparent: false,
+                opacity: 1.0,
+                depthWrite: true,
+                side: THREE.DoubleSide,
+                polygonOffset: true,
+                polygonOffsetFactor: -1,
+                polygonOffsetUnits: -4,
+              });
+            } else {
+              // Objeto de referencia bajo retopología: Sombreado translúcido fantasma
+              finalMaterial = new THREE.MeshStandardMaterial({
+                color: 0x1e293b,
+                roughness: 0.9,
+                metalness: 0.1,
+                transparent: true,
+                opacity: 0.16,
+                depthWrite: false,
+                side: THREE.DoubleSide,
+              });
+            }
+          } else if (isBlueprintActive) {
             finalMaterial = new THREE.MeshStandardMaterial({
               color: 0x091b33,
               roughness: 0.85,
@@ -2963,7 +3027,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       const isEditModeActive = editMode !== 'OBJECT' && isSelected;
       const uniqueEdges = (obj.faces && obj.faces.length > 0) || (obj.wireframeEdges && obj.wireframeEdges.length > 0)
         ? extractUniqueEdges(obj, {
-            dissolveCoplanars: isBlueprintActive || (!isEditModeActive && viewMode !== 'WIREFRAME' && viewMode !== 'TEXTURED_WIREFRAME' && viewMode !== 'FACES_VERTICES'),
+            dissolveCoplanars: isBlueprintActive || (!isEditModeActive && viewMode !== 'WIREFRAME' && viewMode !== 'TEXTURED_WIREFRAME' && viewMode !== 'FACES_VERTICES' && !isRetopoActive),
             coplanarAngleDeg: isBlueprintActive || obj.silhouetteOnly ? Math.max(35.0, obj.creaseAngle ?? 35.0) : (obj.creaseAngle ?? 15.0),
             silhouetteOnly: isBlueprintActive || !!obj.silhouetteOnly,
           })
@@ -2994,23 +3058,25 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
 
       const isWireOnly = obj.isWireframeOnly || !obj.faces || obj.faces.length === 0;
-      const shouldShowEdges = isWireOnly || viewMode === 'WIREFRAME' || viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'FACES_VERTICES' || isBlueprintActive || editMode !== 'OBJECT' || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
+      const shouldShowEdges = isWireOnly || viewMode === 'WIREFRAME' || viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'FACES_VERTICES' || isBlueprintActive || isRetopoActive || editMode !== 'OBJECT' || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
 
       const wireColor = isBlueprintActive
         ? 0x00f0ff
-        : (isWireOnly
-            ? (isSelected ? 0x60a5fa : 0x4ade80)
-            : (viewMode === 'WIREFRAME' 
-                ? (isSelected ? 0x4f8ef7 : 0x22dd44) 
-                : (viewMode === 'TEXTURED_WIREFRAME'
-                    ? (isSelected ? 0x38bdf8 : 0x0284c7)
-                    : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444))));
+        : (isRetopoActive
+            ? (isRetopoObj ? 0xffffff : (isSelected ? 0x38bdf8 : 0x64748b))
+            : (isWireOnly
+                ? (isSelected ? 0x60a5fa : 0x4ade80)
+                : (viewMode === 'WIREFRAME' 
+                    ? (isSelected ? 0x4f8ef7 : 0x22dd44) 
+                    : (viewMode === 'TEXTURED_WIREFRAME'
+                        ? (isSelected ? 0x38bdf8 : 0x0284c7)
+                        : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444)))));
 
       const edgeLines = new THREE.LineSegments(
         edgeGeo,
         new THREE.LineBasicMaterial({
           color: wireColor,
-          opacity: isBlueprintActive ? 0.95 : (isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'TEXTURED_WIREFRAME' ? 0.85 : (viewMode === 'FACES_VERTICES' ? 0.85 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0))))),
+          opacity: isBlueprintActive ? 0.95 : (isRetopoActive ? (isRetopoObj ? 1.0 : 0.8) : (isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'TEXTURED_WIREFRAME' ? 0.85 : (viewMode === 'FACES_VERTICES' ? 0.85 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0)))))),
           transparent: true,
           visible: shouldShowEdges,
           depthTest: !isWireOnly && viewMode !== 'WIREFRAME', 
@@ -3225,7 +3291,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             cpCurvePts.renderOrder = 35;
             group.add(cpCurvePts);
           }
-        } else if (editMode === 'VERTEX' || viewMode === 'FACES_VERTICES') {
+        } else if (editMode === 'VERTEX' || viewMode === 'FACES_VERTICES' || (isRetopoActive && isRetopoObj) || (drawMode === 'retopo' && isRetopoObj)) {
             const pointGeo = new THREE.BufferGeometry();
             const logicalVerts: number[] = [];
             const vertColors: number[] = [];
@@ -3556,6 +3622,86 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           }
         });
         drawingMeshRef.current = null;
+      }
+
+      if (drawMode === 'retopo') {
+        const poly = retopoCurrentPolyRef.current.map(p => p.pos.clone());
+        if (drawingPreviewPointRef.current) {
+          poly.push(drawingPreviewPointRef.current.clone());
+        }
+        if (poly.length > 0 || (drawingPreviewPointRef as any)?._snapping) {
+          const group = new THREE.Group();
+          group.name = '__RETOPO_PREVIEW__';
+
+          if (poly.length >= 2) {
+            const geo = new THREE.BufferGeometry().setFromPoints(poly);
+            const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x06b6d4, depthTest: false }));
+            line.renderOrder = 9998;
+            group.add(line);
+          }
+
+          if (poly.length >= 3) {
+            const closeGeo = new THREE.BufferGeometry().setFromPoints([poly[poly.length - 1], poly[0]]);
+            const closeLine = new THREE.Line(closeGeo, new THREE.LineDashedMaterial({ color: 0x22d3ee, dashSize: 0.05, gapSize: 0.03, depthTest: false }));
+            closeLine.computeLineDistances();
+            closeLine.renderOrder = 9998;
+            group.add(closeLine);
+          }
+
+          poly.forEach((p, i) => {
+            const isFirst = i === 0;
+            const mat = isFirst ? SHARED_START_MAT : SHARED_ACTIVE_MAT;
+            const dot = new THREE.Mesh(SHARED_VERTEX_GEO, mat);
+            dot.scale.setScalar(0.016);
+            dot.position.copy(p);
+            dot.renderOrder = 9999;
+            group.add(dot);
+          });
+
+          if ((drawingPreviewPointRef as any)?._snappedEdge) {
+            const edge = (drawingPreviewPointRef as any)._snappedEdge;
+            const edgeGeo = new THREE.BufferGeometry().setFromPoints([edge.p1, edge.p2]);
+            const edgeLine = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({ color: 0x22d3ee, depthTest: false }));
+            edgeLine.renderOrder = 9999;
+            group.add(edgeLine);
+          }
+
+          // Snap indicator on hovered vertex
+          if ((drawingPreviewPointRef as any)?._snapping && drawingPreviewPointRef.current) {
+            const snapPos = drawingPreviewPointRef.current;
+            const cam = cameraRef.current;
+            let scale = 1;
+            if (cam) {
+              const dist = cam.position.distanceTo(snapPos);
+              scale = Math.max(0.4, Math.min(3.0, dist * 0.12));
+            }
+
+            const ringGeo = new THREE.RingGeometry(0.045 * scale, 0.075 * scale, 32);
+            const ringMat = new THREE.MeshBasicMaterial({
+              color: 0x06b6d4,
+              side: THREE.DoubleSide,
+              depthTest: false,
+              transparent: true,
+              opacity: 0.95
+            });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.position.copy(snapPos);
+            if (cam) ring.quaternion.copy(cam.quaternion);
+            ring.renderOrder = 9998;
+            group.add(ring);
+
+            const innerGeo = new THREE.SphereGeometry(0.025 * scale, 16, 16);
+            const innerMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, depthTest: false });
+            const innerDot = new THREE.Mesh(innerGeo, innerMat);
+            innerDot.position.copy(snapPos);
+            innerDot.renderOrder = 9999;
+            group.add(innerDot);
+          }
+
+          sceneRef.current.add(group);
+          drawingMeshRef.current = group;
+        }
+        return;
       }
 
       const points = [...drawingPointsRef.current];
@@ -4001,11 +4147,254 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       });
     };
 
+    const findRetopoSnapEdge = (clientX: number, clientY: number, pxThresh = 20) => {
+      if (!cameraRef.current || !rendererRef.current) return null;
+      const cam = cameraRef.current;
+      const rnd = rendererRef.current;
+      const rect = rnd.domElement.getBoundingClientRect();
+      const sx = clientX - rect.left;
+      const sy = clientY - rect.top;
+      const w  = rect.width;
+      const h  = rect.height;
+
+      let best: { v1: number; v2: number; p1: THREE.Vector3; p2: THREE.Vector3; objId?: string } | null = null;
+      let bestDist = pxThresh;
+
+      // Check active retopo mesh edges first
+      if (retopoTargetMeshIdRef.current) {
+        const targetMesh = projectRef.current.objects.find(o => o.id === retopoTargetMeshIdRef.current);
+        if (targetMesh && targetMesh.vertices && targetMesh.edges) {
+          const mat = getShapeMatrix(targetMesh);
+          for (const [i1, i2] of targetMesh.edges) {
+            const raw1 = targetMesh.vertices[i1];
+            const raw2 = targetMesh.vertices[i2];
+            if (!raw1 || !raw2) continue;
+
+            const p1 = new THREE.Vector3(raw1[0], raw1[1], raw1[2]).applyMatrix4(mat);
+            const p2 = new THREE.Vector3(raw2[0], raw2[1], raw2[2]).applyMatrix4(mat);
+
+            const ndc1 = p1.clone().project(cam);
+            const ndc2 = p2.clone().project(cam);
+            if (ndc1.z > 1 || ndc2.z > 1) continue;
+
+            const x1 = (ndc1.x * 0.5 + 0.5) * w;
+            const y1 = (ndc1.y * -0.5 + 0.5) * h;
+            const x2 = (ndc2.x * 0.5 + 0.5) * w;
+            const y2 = (ndc2.y * -0.5 + 0.5) * h;
+
+            const dx = x2 - x1, dy = y2 - y1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0) continue;
+
+            const t = Math.max(0, Math.min(1, ((sx - x1) * dx + (sy - y1) * dy) / lenSq));
+            const projX = x1 + t * dx;
+            const projY = y1 + t * dy;
+            const d = Math.hypot(sx - projX, sy - projY);
+
+            if (d < bestDist) {
+              bestDist = d;
+              best = { v1: i1, v2: i2, p1, p2, objId: targetMesh.id };
+            }
+          }
+        }
+      }
+
+      return best;
+    };
+
+    const findRetopoSnapVertex = (clientX: number, clientY: number, pxThresh = 26) => {
+      if (!cameraRef.current || !rendererRef.current) return null;
+      const cam = cameraRef.current;
+      const rnd = rendererRef.current;
+      const rect = rnd.domElement.getBoundingClientRect();
+      const sx = clientX - rect.left;
+      const sy = clientY - rect.top;
+      const w  = rect.width;
+      const h  = rect.height;
+
+      let best: { pos: THREE.Vector3; idx: number | null; isOwnStart: boolean; objId?: string } | null = null;
+      let bestDist = pxThresh;
+
+      // 1. Check in-progress retopo polygon start (to close face)
+      const poly = retopoCurrentPolyRef.current;
+      if (poly.length >= 2) {
+        const firstPt = poly[0].pos;
+        const ndc = firstPt.clone().project(cam);
+        if (ndc.z <= 1) {
+          const px = (ndc.x * 0.5 + 0.5) * w;
+          const py = (ndc.y * -0.5 + 0.5) * h;
+          const d = Math.hypot(px - sx, py - sy);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { pos: firstPt.clone(), idx: poly[0].snapIdx, isOwnStart: true };
+          }
+        }
+      }
+
+      // 2. Check active retopo mesh vertices (to reuse topology and share edges)
+      if (retopoTargetMeshIdRef.current) {
+        const targetMesh = projectRef.current.objects.find(o => o.id === retopoTargetMeshIdRef.current);
+        if (targetMesh && targetMesh.vertices) {
+          const mat = getShapeMatrix(targetMesh);
+          targetMesh.vertices.forEach((v, i) => {
+            const world = new THREE.Vector3(v[0], v[1], v[2]).applyMatrix4(mat);
+            const ndc = world.clone().project(cam);
+            if (ndc.z <= 1) {
+              const px = (ndc.x * 0.5 + 0.5) * w;
+              const py = (ndc.y * -0.5 + 0.5) * h;
+              const d = Math.hypot(px - sx, py - sy);
+              if (d < bestDist) {
+                bestDist = d;
+                best = { pos: world, idx: i, isOwnStart: false, objId: targetMesh.id };
+              }
+            }
+          });
+        }
+      }
+
+      // 3. Raycast hit: Check vertices of the hit face of the reference figure directly under cursor
+      const rc = new THREE.Raycaster();
+      const mouse = new THREE.Vector2((sx / w) * 2 - 1, -(sy / h) * 2 + 1);
+      rc.setFromCamera(mouse, cam);
+      const hit = pickSurfaceUnderRay(rc);
+      if (hit && hit.hitFace && hit.hitObject) {
+        const mesh = hit.hitObject as THREE.Mesh;
+        if (mesh.geometry && mesh.geometry.attributes.position) {
+          const posAttr = mesh.geometry.attributes.position;
+          const faceVerts = [hit.hitFace.a, hit.hitFace.b, hit.hitFace.c];
+          const tempV = new THREE.Vector3();
+          for (const vertIdx of faceVerts) {
+            tempV.fromBufferAttribute(posAttr, vertIdx).applyMatrix4(mesh.matrixWorld);
+            const ndc = tempV.clone().project(cam);
+            if (ndc.z <= 1) {
+              const px = (ndc.x * 0.5 + 0.5) * w;
+              const py = (ndc.y * -0.5 + 0.5) * h;
+              const d = Math.hypot(px - sx, py - sy);
+              if (d < bestDist) {
+                bestDist = d;
+                best = { pos: tempV.clone(), idx: null, isOwnStart: false, objId: mesh.userData?.id };
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Check ALL figures and objects in the scene (cubes, cylinders, shapes, meshes)
+      for (const obj of projectRef.current.objects) {
+        if (obj.id === retopoTargetMeshIdRef.current) continue;
+        const _interp = getInterpolatedTransform(obj, currentTime);
+        const mat4 = new THREE.Matrix4().compose(
+          new THREE.Vector3().fromArray(_interp.position),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+          new THREE.Vector3().fromArray(_interp.scale),
+        );
+
+        if (obj.vertices && obj.vertices.length > 0) {
+          for (let i = 0; i < obj.vertices.length; i++) {
+            const v = obj.vertices[i];
+            const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+            const world = new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
+            const ndc = world.clone().project(cam);
+            if (ndc.z > 1) continue;
+            const px = (ndc.x * 0.5 + 0.5) * w;
+            const py = (ndc.y * -0.5 + 0.5) * h;
+            const d = Math.hypot(px - sx, py - sy);
+            if (d < bestDist) {
+              bestDist = d;
+              best = { pos: world, idx: null, isOwnStart: false, objId: obj.id };
+            }
+          }
+        }
+      }
+
+      // 5. Also check Three.js geometry buffers of all scene meshes
+      if (primitivesGroupRef.current) {
+        primitivesGroupRef.current.traverse((child) => {
+          if ((child as any).isMesh && child.visible && (child as THREE.Mesh).geometry) {
+            const mesh = child as THREE.Mesh;
+            const posAttr = mesh.geometry.attributes.position;
+            if (posAttr) {
+              const count = Math.min(posAttr.count, 4000);
+              const step = Math.max(1, Math.floor(posAttr.count / 4000));
+              const v = new THREE.Vector3();
+              for (let i = 0; i < count; i += step) {
+                v.fromBufferAttribute(posAttr, i).applyMatrix4(mesh.matrixWorld);
+                const ndc = v.clone().project(cam);
+                if (ndc.z > 1) continue;
+                const px = (ndc.x * 0.5 + 0.5) * w;
+                const py = (ndc.y * -0.5 + 0.5) * h;
+                const d = Math.hypot(px - sx, py - sy);
+                if (d < bestDist) {
+                  bestDist = d;
+                  best = { pos: v.clone(), idx: null, isOwnStart: false, objId: mesh.userData?.id };
+                }
+              }
+            }
+          }
+        });
+      }
+
+      return best;
+    };
+
+    const finishRetopoFace = () => {
+      const poly = retopoCurrentPolyRef.current;
+      if (poly.length < 3) return;
+
+      const state = useStore.getState();
+      let targetMesh = retopoTargetMeshIdRef.current
+        ? state.project.objects.find(o => o.id === retopoTargetMeshIdRef.current)
+        : null;
+
+      const existingVerts = targetMesh?.vertices || [];
+      const newVertsToAdd: V3[] = [];
+      const faceIndices: number[] = [];
+
+      for (const item of poly) {
+        if (item.snapIdx !== null && targetMesh && item.snapIdx < existingVerts.length) {
+          faceIndices.push(item.snapIdx);
+        } else {
+          const newIdx = existingVerts.length + newVertsToAdd.length;
+          newVertsToAdd.push([item.pos.x, item.pos.y, item.pos.z]);
+          faceIndices.push(newIdx);
+        }
+      }
+
+      if (faceIndices.length >= 3) {
+        const meshId = state.addRetopoFace(retopoTargetMeshIdRef.current, newVertsToAdd, faceIndices);
+        retopoTargetMeshIdRef.current = meshId;
+      }
+
+      retopoCurrentPolyRef.current = [];
+      drawingPreviewPointRef.current = null;
+      updatePreview();
+    };
+
+    finishRetopoFaceRef.current = finishRetopoFace;
     finishStrokeRef.current = finishStroke;
     updatePreviewRef.current = updatePreview;
 
     const onPointerDown = (e: PointerEvent) => {
-      if (e.button !== 0) return;
+      // ── Right Double-Click (RMB DblClick) to cancel in-progress stroke without exiting tool ──
+      if (e.button === 2 && drawMode) {
+        const now = Date.now();
+        const lastRmb = (onPointerDown as any)._lastRmbTime || 0;
+        (onPointerDown as any)._lastRmbTime = now;
+        if (now - lastRmb < 350) {
+          drawingPointsRef.current = [];
+          drawingHandlesRef.current = [];
+          drawingObjectIdRef.current = null;
+          drawingStartAnchorIdxRef.current = null;
+          drawingPreviewPointRef.current = null;
+          retopoCurrentPolyRef.current = [];
+          updatePreview();
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
+
+      if (e.button !== 0 || e.altKey) return;
 
       // ── SILUETA mode ──────────────────────────────────────────────────────
       const isSiluetaActive = !!(silueta.activePlane && 
@@ -4112,6 +4501,88 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       (onPointerDown as any)._lastMs = now;
       if (now - last < 260) { (onPointerDown as any)._skipOne = true; return; }
       if ((onPointerDown as any)._skipOne) { (onPointerDown as any)._skipOne = false; return; }
+
+      // ── RETOPOLOGY mode ──────────────────────────────────────────────────
+      if (drawMode === 'retopo') {
+        const snapVert = findRetopoSnapVertex(e.clientX, e.clientY, 26);
+        const snapEdge = (retopoCurrentPolyRef.current.length === 0)
+          ? findRetopoSnapEdge(e.clientX, e.clientY, 20)
+          : null;
+
+        // If clicking an existing retopo edge to start a new adjacent quad directly:
+        if (retopoCurrentPolyRef.current.length === 0 && snapEdge && !snapVert) {
+          retopoCurrentPolyRef.current = [
+            { pos: snapEdge.p1.clone(), snapIdx: snapEdge.v1 },
+            { pos: snapEdge.p2.clone(), snapIdx: snapEdge.v2 }
+          ];
+          schedulePreviewUpdate();
+          return;
+        }
+
+        if (snapVert) {
+          // If clicking on own start vertex -> close polygon face
+          if (snapVert.isOwnStart && retopoCurrentPolyRef.current.length >= 3) {
+            finishRetopoFace();
+            return;
+          }
+
+          const targetMesh = retopoTargetMeshIdRef.current
+            ? projectRef.current.objects.find(o => o.id === retopoTargetMeshIdRef.current)
+            : null;
+
+          const poly = retopoCurrentPolyRef.current;
+          
+          if (poly.length >= 2 && snapVert.idx !== null && targetMesh && targetMesh.edges) {
+            const startIdx = poly[0].snapIdx;
+            const sharesEdgeWithStart = startIdx !== null && targetMesh.edges.some(([a, b]) => 
+              (a === startIdx && b === snapVert.idx) || (a === snapVert.idx && b === startIdx)
+            );
+
+            if (poly.length === 3 || sharesEdgeWithStart) {
+              poly.push({ pos: snapVert.pos.clone(), snapIdx: snapVert.idx });
+              finishRetopoFace();
+              return;
+            }
+          }
+
+          poly.push({ pos: snapVert.pos.clone(), snapIdx: snapVert.idx });
+
+          // Auto-close quad if 4 points are placed and base was an existing edge
+          if (poly.length === 4 && poly[0].snapIdx !== null && poly[1].snapIdx !== null) {
+            finishRetopoFace();
+            return;
+          }
+        } else {
+          // New free point on surface
+          let pos: THREE.Vector3 | null = null;
+          if (rendererRef.current && cameraRef.current) {
+            const rc = new THREE.Raycaster();
+            const rect = rendererRef.current.domElement.getBoundingClientRect();
+            const mouse = new THREE.Vector2(
+              ((e.clientX - rect.left) / rect.width) * 2 - 1,
+              -((e.clientY - rect.top) / rect.height) * 2 + 1
+            );
+            rc.setFromCamera(mouse, cameraRef.current);
+            const hit = pickSurfaceUnderRay(rc);
+            if (hit) {
+              pos = hit.point.clone().add(hit.normal.clone().multiplyScalar(0.003));
+            }
+          }
+          if (!pos) {
+            pos = getPoint(e) || new THREE.Vector3();
+          }
+
+          const poly = retopoCurrentPolyRef.current;
+          poly.push({ pos, snapIdx: null });
+
+          if (poly.length === 4 && poly[0].snapIdx !== null && poly[1].snapIdx !== null) {
+            finishRetopoFace();
+            return;
+          }
+        }
+        schedulePreviewUpdate();
+        return;
+      }
 
       // ── FREEHAND mode ──────────────────────────────────────────────────────
       if (drawMode === 'freehand') {
@@ -4274,8 +4745,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      // If user is rotating or panning with RMB (button 2) or MMB (button 4), let OrbitControls handle it smoothly
-      if ((e.buttons & 2) !== 0 || (e.buttons & 4) !== 0) {
+      // If user is rotating or panning with RMB (button 2), MMB (button 4), or Alt+drag, let OrbitControls handle it smoothly
+      if ((e.buttons & 2) !== 0 || (e.buttons & 4) !== 0 || e.altKey) {
         return;
       }
 
@@ -4326,6 +4797,46 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       }
 
       if (!drawMode) return;
+
+      if (drawMode === 'retopo') {
+        const snapVert = findRetopoSnapVertex(e.clientX, e.clientY, 26);
+        const snapEdge = (retopoCurrentPolyRef.current.length === 0)
+          ? findRetopoSnapEdge(e.clientX, e.clientY, 20)
+          : null;
+
+        if (snapVert) {
+          drawingPreviewPointRef.current = snapVert.pos.clone();
+          (drawingPreviewPointRef as any)._snapping = true;
+          (drawingPreviewPointRef as any)._snappedEdge = null;
+        } else if (snapEdge) {
+          (drawingPreviewPointRef as any)._snapping = false;
+          (drawingPreviewPointRef as any)._snappedEdge = { p1: snapEdge.p1.clone(), p2: snapEdge.p2.clone() };
+          drawingPreviewPointRef.current = null;
+        } else {
+          let pos: THREE.Vector3 | null = null;
+          if (rendererRef.current && cameraRef.current) {
+            const rc = new THREE.Raycaster();
+            const rect = rendererRef.current.domElement.getBoundingClientRect();
+            const mouse = new THREE.Vector2(
+              ((e.clientX - rect.left) / rect.width) * 2 - 1,
+              -((e.clientY - rect.top) / rect.height) * 2 + 1
+            );
+            rc.setFromCamera(mouse, cameraRef.current);
+            const hit = pickSurfaceUnderRay(rc);
+            if (hit) {
+              pos = hit.point.clone().add(hit.normal.clone().multiplyScalar(0.003));
+            }
+          }
+          if (!pos) {
+            pos = getPoint(e) || new THREE.Vector3();
+          }
+          drawingPreviewPointRef.current = pos;
+          (drawingPreviewPointRef as any)._snapping = false;
+          (drawingPreviewPointRef as any)._snappedEdge = null;
+        }
+        schedulePreviewUpdate();
+        return;
+      }
 
       // Show snap-to-endpoint highlight, or plain cursor position
       const snap = findSnapEndpoint(e.clientX, e.clientY, 22);
@@ -4380,6 +4891,11 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
     };
 
     const onDblClick = (_e: PointerEvent) => {
+      if (drawMode === 'retopo' && retopoCurrentPolyRef.current.length >= 3) {
+        finishRetopoFace();
+        return;
+      }
+
       if ((drawMode === 'line' || drawMode === 'bezier' || drawMode === 'smooth' || drawMode === 'polyline') && drawingPointsRef.current.length > 1) {
         // Reset double-click guard
         (onPointerDown as any)._lastMs  = 0;
@@ -4778,9 +5294,9 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         }
       }
 
-      if (drawMode) return;
       if (!containerRef.current||!cameraRef.current||!rendererRef.current) return;
       setActiveViewport(type);
+      if (drawMode) return;
       const rect=rendererRef.current.domElement.getBoundingClientRect();
       if (event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom) return;
       const mx=event.clientX-rect.left, my=event.clientY-rect.top;
@@ -7659,23 +8175,34 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       const tag = (event.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
 
-      // ── Escape to finish/exit drawing, insert vertex mode or clear selection ──
+      // ── Escape to cancel in-progress stroke or exit drawing ──
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        if (drawMode) {
-          if (drawingPointsRef.current.length >= 2) {
-            // Commit and finish what was drawn without losing the work
-            finishStrokeRef.current?.(null);
+        if (drawMode === 'retopo') {
+          if (retopoCurrentPolyRef.current.length > 0) {
+            retopoCurrentPolyRef.current = [];
+            drawingPreviewPointRef.current = null;
+            if (updatePreviewRef.current) updatePreviewRef.current();
           } else {
+            retopoTargetMeshIdRef.current = null;
+            useStore.getState().setDrawMode(null);
+          }
+          return;
+        }
+        if (drawMode) {
+          if (drawingPointsRef.current.length > 0) {
+            // Cancel/discard in-progress stroke and keep tool active for next stroke
             drawingPointsRef.current = [];
             drawingHandlesRef.current = [];
             drawingObjectIdRef.current = null;
             drawingStartAnchorIdxRef.current = null;
             drawingPreviewPointRef.current = null;
             if (updatePreviewRef.current) updatePreviewRef.current();
+          } else {
+            // Already clean -> second Esc exits the tool
+            useStore.getState().setDrawMode(null);
           }
-          useStore.getState().setDrawMode(null);
           return;
         }
         if (insertVertexMode) {
@@ -7693,10 +8220,46 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         return;
       }
 
-      // ── Enter to finish stroke while drawing ──
-      if (event.key === 'Enter' && drawMode) {
+      // ── Backspace to delete last vertex while drawing ──
+      if (event.key === 'Backspace' || event.key === 'Delete') {
+        if (drawMode === 'retopo') {
+          event.preventDefault();
+          if (retopoCurrentPolyRef.current.length > 0) {
+            retopoCurrentPolyRef.current.pop();
+            if (updatePreviewRef.current) updatePreviewRef.current();
+          }
+          return;
+        } else if (drawMode && drawingPointsRef.current.length > 0) {
+          event.preventDefault();
+          drawingPointsRef.current.pop();
+          if (drawingHandlesRef.current.length > 0) drawingHandlesRef.current.pop();
+          if (updatePreviewRef.current) updatePreviewRef.current();
+          return;
+        }
+      }
+
+      // ── Enter to finish stroke while drawing or retopo face ──
+      if (event.key === 'Enter') {
+        if (drawMode === 'retopo') {
+          event.preventDefault();
+          if (retopoCurrentPolyRef.current.length >= 3) {
+            finishRetopoFaceRef.current?.();
+          }
+          return;
+        } else if (drawMode) {
+          event.preventDefault();
+          finishStrokeRef.current?.(null);
+          return;
+        }
+      }
+
+      // ── Backspace to delete last vertex of in-progress retopo polygon ──
+      if (event.key === 'Backspace' && drawMode === 'retopo') {
         event.preventDefault();
-        finishStrokeRef.current?.(null);
+        if (retopoCurrentPolyRef.current.length > 0) {
+          retopoCurrentPolyRef.current.pop();
+          if (updatePreviewRef.current) updatePreviewRef.current();
+        }
         return;
       }
 
@@ -8531,51 +9094,6 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         }}
         onToggleMaximize={() => setMaximizedViewport(maximizedViewport === type ? null : type)}
       />
-
-      {/* Floating Drawing Mode / Vertex Tool Action Banner */}
-      {drawMode && (
-        <div className="absolute top-10 sm:top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-zinc-900/95 border border-indigo-500/80 shadow-2xl rounded-full px-3.5 py-1.5 backdrop-blur-md text-white select-none pointer-events-auto max-w-[90%]">
-          <div className="flex items-center gap-1.5 font-bold text-xs shrink-0">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-zinc-300">Dibujando:</span>
-            <span className="text-indigo-300 font-semibold">
-              {drawMode === 'freehand' ? 'Mano Alzada (Lápiz)' : drawMode === 'smooth' ? 'Curva Suave' : drawMode === 'bezier' ? 'Curva Bézier' : drawMode === 'line' ? 'Polilínea' : 'Rectángulo'}
-            </span>
-          </div>
-          <div className="hidden md:block w-px h-3.5 bg-white/20 mx-0.5" />
-          <span className="text-[10px] text-zinc-400 hidden md:inline">Doble clic para terminar</span>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              useStore.getState().setDrawMode(null);
-            }}
-            className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 hover:bg-red-500/40 text-red-300 border border-red-500/40 flex items-center gap-1 transition-colors cursor-pointer shrink-0"
-            title="Salir del modo dibujo y volver al modo selección (Esc)"
-          >
-            <X size={12} /> Salir (Esc)
-          </button>
-        </div>
-      )}
-
-      {insertVertexMode && (
-        <div className="absolute top-10 sm:top-12 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-zinc-900/95 border border-cyan-500/80 shadow-2xl rounded-full px-3.5 py-1.5 backdrop-blur-md text-white select-none pointer-events-auto max-w-[90%]">
-          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0" />
-          <span className="text-xs font-bold text-cyan-300 shrink-0">+ Insertar Vértice:</span>
-          <span className="text-[10px] text-zinc-400 hidden sm:inline">Haz clic sobre una arista o curva</span>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              useStore.getState().toggleInsertVertexMode(false);
-            }}
-            className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-white/10 flex items-center gap-1 transition-colors cursor-pointer ml-1 shrink-0"
-            title="Desactivar modo insertar vértice (Esc)"
-          >
-            <X size={12} /> Desactivar (Esc)
-          </button>
-        </div>
-      )}
 
       {/* 2. Navigation and Alignment Toolbar */}
       <ViewportNavigationControls

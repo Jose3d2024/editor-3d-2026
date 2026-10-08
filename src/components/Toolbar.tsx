@@ -9,12 +9,13 @@ import {
   ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid, LayoutGrid, Check, SlidersHorizontal,
   GripVertical, GripHorizontal, Pin, PinOff, AlignStartVertical, Plus, X, Sparkles,
   Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split,
-  Keyboard, Cloud, Wind, Flame, Waves, Bone, Camera
+  Keyboard, Cloud, Wind, Flame, Waves, Bone, Camera, ShieldCheck
 } from 'lucide-react';
 import { downloadViewportSnapshot } from '../utils/viewportCapture';
 import { ConfirmModal } from './ConfirmModal';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import { SaveProjectModal, saveSceneToStorage, getSavedScenes } from './SaveProjectModal';
+import { saveTempBackup, restoreTempBackup, downloadBackupFile, getTempBackup } from '../utils/autoBackup';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
@@ -774,7 +775,7 @@ export const Toolbar: React.FC = () => {
   };
 
   const handleLoad = () => {
-    const input = document.createElement('input'); input.type='file'; input.accept='.json';
+    const input = document.createElement('input'); input.type='file'; input.accept='.3dproj,.json';
     input.onchange=(e:any)=>{
       const reader = new FileReader();
       reader.onload=(ev:any)=>{
@@ -784,7 +785,7 @@ export const Toolbar: React.FC = () => {
           setHasBeenExplicitlySaved(true);
           showToast(`✓ Proyecto "${parsed.name || 'Cargado'}" importado.`);
         } catch {
-          alert('Error al cargar archivo JSON.');
+          alert('Error al cargar archivo .3dproj / .json.');
         }
       };
       reader.readAsText(e.target.files[0]);
@@ -1234,7 +1235,65 @@ export const Toolbar: React.FC = () => {
               <span className="flex items-center gap-2"><FolderOpen size={14} className="text-indigo-400"/> Mis Escenas Guardadas</span>
             </button>
             <div className="h-px bg-zinc-800 my-1"/>
-            <button onClick={()=>{handleLoad();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><FolderOpen size={14}/> Abrir archivo .json</button>
+            
+            {/* ── Auto-Backup Section (1:30 min) ── */}
+            <div className="px-2.5 py-1.5 bg-emerald-950/40 border border-emerald-500/30 rounded-lg my-1">
+              <div className="flex items-center justify-between text-[10px] text-emerald-300 font-bold mb-1">
+                <span className="flex items-center gap-1.5"><ShieldCheck size={13} className="text-emerald-400"/> Copia Temporal (1:30 min)</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/>
+              </div>
+              <div className="flex items-center gap-1 mt-1">
+                <button
+                  type="button"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    const s = await saveTempBackup(project);
+                    showToast(`✓ Copia de seguridad temporal guardada (${s.dateStr}).`);
+                    setShowFile(false);
+                  }}
+                  className="flex-1 py-1 px-1.5 bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-200 rounded text-[9.5px] font-semibold text-center transition-colors cursor-pointer"
+                  title="Guardar una copia de seguridad temporal ahora mismo sin sobreescribir el proyecto"
+                >
+                  Guardar Copia
+                </button>
+                <button
+                  type="button"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    const ok = await restoreTempBackup();
+                    if (ok) showToast('✓ Copia temporal de seguridad restaurada.');
+                    else showToast('No se encontró copia temporal previa.');
+                    setShowFile(false);
+                  }}
+                  className="flex-1 py-1 px-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-[9.5px] font-semibold text-center transition-colors cursor-pointer"
+                  title="Restaurar la última copia temporal guardada automáticamente"
+                >
+                  Restaurar
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    downloadBackupFile(project);
+                    setShowFile(false);
+                  }}
+                  className="p-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[9.5px] transition-colors cursor-pointer"
+                  title="Descargar copia de seguridad como archivo .3dproj (escena completa)"
+                >
+                  <Download size={11} />
+                </button>
+              </div>
+            </div>
+
+            <div className="h-px bg-zinc-800 my-1"/>
+            <button onClick={()=>{handleLoad();setShowFile(false);}} className="flex items-center justify-between w-full px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-zinc-200">
+              <span className="flex items-center gap-2"><FolderOpen size={14} className="text-zinc-400"/> Abrir proyecto (.3dproj / .json)</span>
+              <span className="text-[9px] text-zinc-500 font-mono">Escena</span>
+            </button>
+            <button onClick={()=>{downloadBackupFile(project);setShowFile(false);}} className="flex items-center justify-between w-full px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-indigo-300 font-medium">
+              <span className="flex items-center gap-2"><Download size={14} className="text-indigo-400"/> Guardar como archivo (.3dproj)</span>
+              <span className="text-[9px] text-indigo-400/80 font-mono">100% Escena</span>
+            </button>
             <button onClick={()=>{handleImport();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Upload size={14}/> Importar 3D (STL/OBJ/GLTF)</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{handleReset();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-rose-400 font-medium"><RotateCcw size={14}/> Reiniciar Proyecto</button>
@@ -1667,6 +1726,36 @@ export const Toolbar: React.FC = () => {
                             <div className="text-left">
                               <span className="text-[10.5px] font-bold block">Línea / Polilínea</span>
                               <span className="text-[8.5px] text-zinc-400 block leading-tight">Segmentos rectos conectados</span>
+                            </div>
+                          </button>
+                          <button onClick={()=>{setDrawMode(drawMode==='retopo'?null:'retopo');setShowMainCreate(false);}} 
+                            className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer ${drawMode==='retopo'?'bg-cyan-600 border-cyan-400 text-white shadow-md':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
+                            <LayoutGrid size={18} className={drawMode==='retopo'?'text-white':'text-cyan-400'}/>
+                            <div className="text-left">
+                              <span className="text-[10.5px] font-bold block">Retopología Manual</span>
+                              <span className="text-[8.5px] text-zinc-400 block leading-tight">Caras y quads guiados sobre figuras</span>
+                            </div>
+                          </button>
+                          <button onClick={async ()=>{
+                            setShowMainCreate(false);
+                            const state = useStore.getState();
+                            const targetId = state.selectedObjectId || state.project.objects[0]?.id;
+                            if (targetId) {
+                              await state.retopologizeObject(targetId, {
+                                mode: 'QUAD_DOMINANT',
+                                targetRatio: 0.25,
+                                adaptiveCurvature: true,
+                                preserveCreases: true,
+                                hardSurfaceProtection: true,
+                              });
+                            }
+                          }} 
+                            className="flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer bg-cyan-950/60 border-cyan-700/60 text-cyan-200 hover:bg-cyan-900/60 shadow-sm"
+                            title="Remallado automático adaptativo por silueta y contorno (elimina puntos planos innecesarios)">
+                            <Zap size={18} className="text-amber-400"/>
+                            <div className="text-left">
+                              <span className="text-[10.5px] font-bold block text-cyan-200">⚡ Retopo Automática</span>
+                              <span className="text-[8.5px] text-cyan-300/70 block leading-tight">Remallador limpio según silueta</span>
                             </div>
                           </button>
                         </div>
@@ -3013,6 +3102,7 @@ export const Toolbar: React.FC = () => {
             <button onClick={()=>{setViewMode('TEXTURED_WIREFRAME');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='TEXTURED_WIREFRAME'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Layers size={14} className="text-cyan-400"/> Texturas + Malla</button>
             <button onClick={()=>{setViewMode('WIREFRAME');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='WIREFRAME'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Grid size={14}/> Malla</button>
             <button onClick={()=>{setViewMode('FACES_VERTICES');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='FACES_VERTICES'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Layers size={14} className="text-emerald-400"/> Caras + Vértices</button>
+            <button onClick={()=>{setViewMode('RETOPO_OVERLAY');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='RETOPO_OVERLAY'?'bg-cyan-600 text-white font-bold shadow-sm':'hover:bg-zinc-800 text-cyan-300'}`} title="Vista especial: Malla del objeto de referencia y Sólido de la retopología manual"><LayoutGrid size={14} className="text-cyan-400"/> Retopo: Ref Malla / Retopo Sólido</button>
             <button onClick={()=>{setViewMode('BLUEPRINT');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='BLUEPRINT'?'bg-cyan-600 text-white font-bold shadow-sm':'hover:bg-zinc-800 text-cyan-300'}`} title="Vista técnica holograma blueprint con sombreado azul y líneas de pliegue"><Sparkles size={14} className="text-cyan-300"/> Plano Blueprint</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{setShowOpacity(true);setShowView(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Layers size={14}/> Transparencia</button>

@@ -9,6 +9,7 @@ import { MaterialPanel } from './MaterialPanel';
 import { ConfigPanel } from './ConfigPanel';
 import { EditMeshPanel } from './EditMeshPanel';
 import { HistoryPanel } from './HistoryPanel';
+import { RetopologyPanel } from './RetopologyPanel';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
@@ -7965,7 +7966,8 @@ export const PropertiesPanel: React.FC = () => {
     project, selectedObjectId, selectedObjectIds, updateObject, removeObject, removeObjects,
     duplicateObject, saveHistory, selectObject, toggleObjectSelection,
     moveObjectUp, moveObjectDown, selectedLightId, selectedCameraId,
-    removeLight, removeCamera, selectLight, selectCamera, updateLight, editMode, setEditMode
+    removeLight, removeCamera, selectLight, selectCamera, updateLight, editMode, setEditMode,
+    drawMode
   } = useStore();
 
   const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'HISTORIAL' | 'EDIT_MESH' | 'MATERIALS' | 'SCENE' | 'CONFIG'>('PROPERTIES');
