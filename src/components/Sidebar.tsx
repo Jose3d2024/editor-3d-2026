@@ -14,6 +14,7 @@ import { validateMesh } from '../utils/modifiers';
 import { Exporter } from '../utils/exporters';
 import { hasChildrenOrSubObjects } from '../utils/ungroup';
 import { safeFixed, safeNum, safeParseFixed } from '../utils/numberUtils';
+import { getObjectFaceCount } from '../utils/meshStats';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 const Section = ({ title, icon: Icon, children, defaultOpen = true, badge }: {
@@ -369,6 +370,12 @@ export const Sidebar: React.FC = () => {
               >
                 <div className="w-2 h-2 rounded-full ring-1 ring-white/10 flex-shrink-0" style={{ backgroundColor: obj.color }} />
                 <span className="text-[11px] truncate flex-1 font-medium">{obj.name}</span>
+                <span 
+                  className="text-[8.5px] font-mono font-semibold px-1.5 py-0.5 rounded bg-zinc-800/80 text-amber-300 border border-amber-500/20 shrink-0"
+                  title={`${getObjectFaceCount(obj).toLocaleString()} caras`}
+                >
+                  {getObjectFaceCount(obj).toLocaleString()} c.
+                </span>
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button onClick={e => { e.stopPropagation(); updateObject(obj.id, { visible: !obj.visible }); }} className="p-1 hover:bg-white/10 rounded" title="Visibilidad">
                     {obj.visible ? <Eye size={10} /> : <EyeOff size={10} />}

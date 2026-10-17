@@ -28,6 +28,7 @@ import type { V3, MeshFace, MaterialData, CameraObject, Transform, BackgroundMod
 import { PRESET_HDRIS } from '../utils/environmentHelper';
 import { useStore } from '../store/useStore';
 import type { CSGObject } from '../types';
+import { getObjectFaceCount } from '../utils/meshStats';
 import { MapEditorModal } from './MapEditorModal';
 import { ProceduralMapModal, ProceduralConfig } from './ProceduralMapModal';
 import { createCameraPathObject } from '../utils/cameraPathHelper';
@@ -6136,11 +6137,12 @@ const HierarchyItem: React.FC<{
   onSelect: (id: string, shift: boolean) => void;
   children?: React.ReactNode;
   icon?: React.ReactNode;
+  badge?: React.ReactNode;
   visible?: boolean;
   onToggleVisibility?: (id: string) => void;
   onDuplicate?: (id: string) => void;
   onDelete?: (id: string) => void;
-}> = ({ id, name, type, isSelected, onSelect, children, icon, visible = true, onToggleVisibility, onDuplicate, onDelete }) => {
+}> = ({ id, name, type, isSelected, onSelect, children, icon, badge, visible = true, onToggleVisibility, onDuplicate, onDelete }) => {
   const [isOpen, setIsOpen] = useState(true);
   const hasChildren = !!children;
 
@@ -6172,6 +6174,7 @@ const HierarchyItem: React.FC<{
             {icon || <Box size={14}/>}
           </span>
           <span className="text-[11px] font-medium truncate tracking-tight">{name || `Sin nombre (${type})`}</span>
+          {badge && <div className="ml-auto mr-1 shrink-0">{badge}</div>}
         </div>
         
         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
@@ -6674,6 +6677,14 @@ const SceneManager: React.FC = () => {
                   onDuplicate={(id) => duplicateObject(id)}
                   onDelete={(id) => removeObject(id)}
                   icon={obj.meshData?.type === 'gltf' ? <ImageIcon size={12}/> : undefined}
+                  badge={
+                    <span 
+                      className="text-[8.5px] font-mono font-semibold px-1.5 py-0.5 rounded bg-zinc-800/90 text-amber-300 border border-amber-500/30"
+                      title={`${getObjectFaceCount(obj).toLocaleString()} caras en este objeto`}
+                    >
+                      {getObjectFaceCount(obj).toLocaleString()} caras
+                    </span>
+                  }
                 >
                   {obj.meshData?.type === 'gltf' && obj.meshData.meshes && (
                     <div className="space-y-0.5 mt-1">

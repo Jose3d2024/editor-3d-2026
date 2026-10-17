@@ -110,6 +110,30 @@ export function extractUniqueEdges(
     return result;
   }
 
+  // Si no se disuelven coplanares (ej. Vista Malla Completa / Wireframe), extraer todas las aristas únicas sin pérdida
+  if (!dissolveCoplanars) {
+    const edgeSet = new Set<string>();
+    const allEdges: Array<[number, number]> = [];
+    for (let fIdx = 0; fIdx < faces.length; fIdx++) {
+      const face = faces[fIdx];
+      const idxs = (face.indices && face.indices.length > 0) ? face.indices : (Array.isArray(face) ? face : []);
+      const len = idxs.length;
+      for (let i = 0; i < len; i++) {
+        const a = idxs[i];
+        const b = idxs[(i + 1) % len];
+        if (a === b || a === undefined || b === undefined) continue;
+        const min = Math.min(a, b);
+        const max = Math.max(a, b);
+        const key = `${min}_${max}`;
+        if (!edgeSet.has(key)) {
+          edgeSet.add(key);
+          allEdges.push([min, max]);
+        }
+      }
+    }
+    return allEdges;
+  }
+
   // Normalizar vértices a formato [x, y, z]
   const verts: [number, number, number][] = rawVerts.map(v => 
     Array.isArray(v) ? [v[0], v[1], v[2]] : [(v as any).x || 0, (v as any).y || 0, (v as any).z || 0]
@@ -279,6 +303,10 @@ export function extractEdgesFromBufferGeometry(
   const diag = box.min.distanceTo(box.max) || 1.0;
 
   const dissolveCoplanars = options?.dissolveCoplanars ?? true;
+  // Si no se pide disolver coplanares (ej. Vista Malla Completa / Wireframe), retornar wireframe completo nativo
+  if (!dissolveCoplanars) {
+    return new THREE.WireframeGeometry(geometry);
+  }
   const indexAttr = geometry.index;
   const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
 

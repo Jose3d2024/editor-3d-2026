@@ -2,6 +2,8 @@ import React from 'react';
 import { Project, CSGObject } from '../../types';
 import { safeFixed } from '../../utils/numberUtils';
 
+import { getObjectFaceCount } from '../../utils/meshStats';
+
 interface ViewportInfoOverlayProps {
   selectedObject: CSGObject | null;
   interpolatedPos?: [number, number, number];
@@ -15,15 +17,21 @@ export const ViewportInfoOverlay: React.FC<ViewportInfoOverlayProps> = ({
 }) => {
   return (
     <>
-      {/* Object Coordinate Display */}
+      {/* Object Coordinate & Topology Display */}
       {selectedObject && (
-        <div className="absolute bottom-1 left-1 z-30 px-1.5 py-0.5 bg-black/50 text-[10px] text-white font-mono rounded pointer-events-none select-none">
-          {(() => {
-            const pos = interpolatedPos || selectedObject.transform.position || [0, 0, 0];
-            return `X:${safeFixed(pos[0], 2)} Y:${safeFixed(pos[1], 2)} Z:${safeFixed(pos[2], 2)}${
-              selectedObject.keyframes?.length ? ` [${selectedObject.keyframes.length}kf]` : ''
-            }`;
-          })()}
+        <div className="absolute bottom-1 left-1 z-30 flex items-center gap-1.5 px-2 py-0.5 bg-black/70 backdrop-blur-sm border border-white/10 text-[9.5px] text-zinc-300 font-mono rounded pointer-events-none select-none">
+          <span className="text-zinc-200 font-bold">{selectedObject.name}</span>
+          <span className="text-amber-300 font-bold bg-amber-950/80 px-1.5 py-0.2 rounded border border-amber-500/30">
+            {getObjectFaceCount(selectedObject).toLocaleString()} caras
+          </span>
+          <span className="text-zinc-400 border-l border-zinc-700 pl-1.5">
+            {(() => {
+              const pos = interpolatedPos || selectedObject.transform.position || [0, 0, 0];
+              return `X:${safeFixed(pos[0], 2)} Y:${safeFixed(pos[1], 2)} Z:${safeFixed(pos[2], 2)}${
+                selectedObject.keyframes?.length ? ` [${selectedObject.keyframes.length}kf]` : ''
+              }`;
+            })()}
+          </span>
         </div>
       )}
 

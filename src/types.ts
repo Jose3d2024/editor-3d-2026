@@ -690,7 +690,7 @@ export interface ViewportConfigState {
 export type EditMode       = 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE';
 export type TransformMode  = 'translate' | 'rotate' | 'scale' | 'universal';
 export type TransformSpace = 'world' | 'local';
-export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED' | 'TEXTURED_WIREFRAME' | 'FACES_VERTICES' | 'BLUEPRINT' | 'RETOPO_OVERLAY';
+export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'ALL_WIREFRAME' | 'TEXTURED' | 'TEXTURED_WIREFRAME' | 'FACES_VERTICES' | 'BLUEPRINT' | 'RETOPO_OVERLAY';
 
 export interface HistoryStep {
   id: string;

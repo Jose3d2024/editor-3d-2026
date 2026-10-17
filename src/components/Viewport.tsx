@@ -45,6 +45,7 @@ import { createCameraVisualGroup, applyCameraLookAt, updateCameraTrackingVisual 
 import { ViewportHeader } from './viewport/ViewportHeader';
 import { ViewportNavigationControls } from './viewport/ViewportNavigationControls';
 import { ViewportInfoOverlay } from './viewport/ViewportInfoOverlay';
+import { getObjectFaceCount } from '../utils/meshStats';
 import {
   VERTEX_DOT_TEXTURE,
   VERTEX_CROSS_TEXTURE,
@@ -2226,8 +2227,26 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                 activeMat.shadowSide = THREE.DoubleSide;
                 activeMat.wireframe = false;
 
-                if (viewMode === 'WIREFRAME') {
+                if (viewMode === 'ALL_WIREFRAME') {
                   activeMat.visible = false;
+                } else if (viewMode === 'WIREFRAME') {
+                  // Sombreado de malla: base neutra oscura mate con polygonOffset para que el alambre destaque con nitidez
+                  activeMat.visible = true;
+                  activeMat.map = null;
+                  activeMat.normalMap = null;
+                  activeMat.roughnessMap = null;
+                  activeMat.metalnessMap = null;
+                  activeMat.aoMap = null;
+                  activeMat.emissiveMap = null;
+                  activeMat.displacementMap = null;
+                  activeMat.bumpMap = null;
+                  if (activeMat.color) activeMat.color.set('#0f172a');
+                  activeMat.roughness = 0.95;
+                  activeMat.metalness = 0.05;
+                  activeMat.polygonOffset = true;
+                  activeMat.polygonOffsetFactor = 1;
+                  activeMat.polygonOffsetUnits = 1;
+                  activeMat.needsUpdate = true;
                 } else if (viewMode === 'SOLID') {
                   // Strips textures in SOLID mode while ensuring base surface visibility is true
                   activeMat.visible = true;
@@ -2271,18 +2290,22 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
               mesh.visible = true;
             }
 
-            // If TEXTURED_WIREFRAME, WIREFRAME, isBlueprintActive, RETOPO_OVERLAY (on ref mesh), or showWireframe: add clean topology edge overlay
-            const shouldShowWire = viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'WIREFRAME' || isBlueprintActive || (isRetopoActive && !isRetopoObj) || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
+            // If TEXTURED_WIREFRAME, WIREFRAME, ALL_WIREFRAME, isBlueprintActive, RETOPO_OVERLAY (on ref mesh), or showWireframe: add clean topology edge overlay
+            const isAllWire = viewMode === 'ALL_WIREFRAME';
+            const isWireMode = viewMode === 'WIREFRAME' || isAllWire;
+            const shouldShowWire = isWireMode || viewMode === 'TEXTURED_WIREFRAME' || isBlueprintActive || (isRetopoActive && !isRetopoObj) || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
             if (shouldShowWire) {
               const isSkinned = !!(mesh as any).isSkinnedMesh;
-              const isWireOnly = viewMode === 'WIREFRAME';
+              const isWireOnly = isAllWire || viewMode === 'WIREFRAME';
               const wireColor = isBlueprintActive
                 ? 0x00f0ff // Glowing cyan technical blueprint lines
                 : (isRetopoActive && !isRetopoObj)
                   ? (isSelected ? 0x38bdf8 : 0x64748b)
-                  : (isWireOnly
-                      ? (isSelected ? 0x4f8ef7 : 0x22dd44)
-                      : (isSelected ? 0x38bdf8 : 0x0284c7));
+                  : (isAllWire
+                      ? (isSelected ? 0x34d399 : 0x10b981) // Verde esmeralda nítido para malla completa
+                      : (isWireOnly
+                          ? (isSelected ? 0x38bdf8 : 0x0284c7) // Azul cian / cielo para wireframe
+                          : (isSelected ? 0x38bdf8 : 0x0284c7)));
 
               if (isSkinned) {
                 // MODELO ARTICULADO CON ESQUELETO Y HUESOS (ej. AT-AT Walker):
@@ -2295,7 +2318,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                   wireframe: true,
                   transparent: true,
                   opacity: isBlueprintActive ? 0.95 : (isWireOnly ? 1.0 : 0.85),
-                  depthTest: true,
+                  depthTest: !isAllWire,
                   depthWrite: false,
                   polygonOffset: true,
                   polygonOffsetFactor: -1,
@@ -2314,7 +2337,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                 mesh.add(wireSkinned);
               } else {
                 const edgeGeo = extractEdgesFromBufferGeometry(mesh.geometry, {
-                  dissolveCoplanars: true,
+                  dissolveCoplanars: !isAllWire && !isRetopoActive,
                   coplanarAngleDeg: isBlueprintActive || obj.silhouetteOnly ? Math.max(35.0, obj.creaseAngle ?? 35.0) : (obj.creaseAngle ?? 15.0),
                   silhouetteOnly: isBlueprintActive || !!obj.silhouetteOnly,
                 });
@@ -2324,7 +2347,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                     color: wireColor,
                     transparent: true,
                     opacity: isBlueprintActive ? 0.95 : (isWireOnly ? 1.0 : 0.85),
-                    depthTest: true,
+                    depthTest: !isAllWire,
                     depthWrite: false,
                     polygonOffset: true,
                     polygonOffsetFactor: -1,
@@ -2338,6 +2361,14 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                   edgeLines.userData.isWireOverlay = true;
                   edgeLines.renderOrder = 2;
                   mesh.add(edgeLines);
+
+                  // En Malla normal (WIREFRAME), mostrar los círculos de vértices en el objeto seleccionado
+                  if (isSelected && (viewMode === 'WIREFRAME' || viewMode === 'FACES_VERTICES')) {
+                    const gltfPts = new THREE.Points(mesh.geometry, SHARED_POINTS_MAT);
+                    gltfPts.userData.isWireOverlay = true;
+                    gltfPts.renderOrder = 40;
+                    mesh.add(gltfPts);
+                  }
                 }
               }
             }
@@ -2943,7 +2974,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
         pickProxy.scale.copy(initialScale);
         pickProxy.userData.id = obj.id;
         group.add(pickProxy);
-      } else if (viewMode !== 'WIREFRAME') {
+      } else if (viewMode !== 'WIREFRAME' && viewMode !== 'ALL_WIREFRAME') {
         const opacity = obj.opacity ?? 1;
         
           // Resolve material: priority is inline material > materialId > default
@@ -3024,10 +3055,12 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       }
 
       // ── Wireframe overlay (Topology-based) ───────────────────────────────
+      const isAllWire = viewMode === 'ALL_WIREFRAME';
+      const isWireMode = viewMode === 'WIREFRAME' || isAllWire;
       const isEditModeActive = editMode !== 'OBJECT' && isSelected;
       const uniqueEdges = (obj.faces && obj.faces.length > 0) || (obj.wireframeEdges && obj.wireframeEdges.length > 0)
         ? extractUniqueEdges(obj, {
-            dissolveCoplanars: isBlueprintActive || (!isEditModeActive && viewMode !== 'WIREFRAME' && viewMode !== 'TEXTURED_WIREFRAME' && viewMode !== 'FACES_VERTICES' && !isRetopoActive),
+            dissolveCoplanars: isBlueprintActive || (!isEditModeActive && !isWireMode && viewMode !== 'TEXTURED_WIREFRAME' && viewMode !== 'FACES_VERTICES' && !isRetopoActive),
             coplanarAngleDeg: isBlueprintActive || obj.silhouetteOnly ? Math.max(35.0, obj.creaseAngle ?? 35.0) : (obj.creaseAngle ?? 15.0),
             silhouetteOnly: isBlueprintActive || !!obj.silhouetteOnly,
           })
@@ -3057,20 +3090,22 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       const edgeGeo = new THREE.BufferGeometry();
       edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
 
-      const isWireOnly = obj.isWireframeOnly || !obj.faces || obj.faces.length === 0;
-      const shouldShowEdges = isWireOnly || viewMode === 'WIREFRAME' || viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'FACES_VERTICES' || isBlueprintActive || isRetopoActive || editMode !== 'OBJECT' || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
+      const isWireOnly = obj.isWireframeOnly || !obj.faces || obj.faces.length === 0 || isAllWire;
+      const shouldShowEdges = isWireOnly || isWireMode || viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'FACES_VERTICES' || isBlueprintActive || isRetopoActive || editMode !== 'OBJECT' || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
 
       const wireColor = isBlueprintActive
         ? 0x00f0ff
         : (isRetopoActive
             ? (isRetopoObj ? 0xffffff : (isSelected ? 0x38bdf8 : 0x64748b))
-            : (isWireOnly
-                ? (isSelected ? 0x60a5fa : 0x4ade80)
+            : (isAllWire
+                ? (isSelected ? 0x34d399 : 0x10b981)
                 : (viewMode === 'WIREFRAME' 
-                    ? (isSelected ? 0x4f8ef7 : 0x22dd44) 
-                    : (viewMode === 'TEXTURED_WIREFRAME'
-                        ? (isSelected ? 0x38bdf8 : 0x0284c7)
-                        : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444)))));
+                    ? (isSelected ? 0x38bdf8 : 0x0284c7) 
+                    : (isWireOnly
+                        ? (isSelected ? 0x60a5fa : 0x4ade80)
+                        : (viewMode === 'TEXTURED_WIREFRAME'
+                            ? (isSelected ? 0x38bdf8 : 0x0284c7)
+                            : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444))))));
 
       const edgeLines = new THREE.LineSegments(
         edgeGeo,
@@ -3079,7 +3114,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           opacity: isBlueprintActive ? 0.95 : (isRetopoActive ? (isRetopoObj ? 1.0 : 0.8) : (isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'TEXTURED_WIREFRAME' ? 0.85 : (viewMode === 'FACES_VERTICES' ? 0.85 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0)))))),
           transparent: true,
           visible: shouldShowEdges,
-          depthTest: !isWireOnly && viewMode !== 'WIREFRAME', 
+          depthTest: !isWireOnly && !isAllWire, 
           depthWrite: false,
           polygonOffset: true,
           polygonOffsetFactor: -1,
@@ -3291,45 +3326,64 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             cpCurvePts.renderOrder = 35;
             group.add(cpCurvePts);
           }
-        } else if (editMode === 'VERTEX' || viewMode === 'FACES_VERTICES' || (isRetopoActive && isRetopoObj) || (drawMode === 'retopo' && isRetopoObj)) {
-            const pointGeo = new THREE.BufferGeometry();
-            const logicalVerts: number[] = [];
-            const vertColors: number[] = [];
-            const selectedSet = new Set(selectedVertexIndices);
+        } else if (editMode === 'VERTEX' || viewMode === 'FACES_VERTICES' || (isRetopoActive && isRetopoObj) || (drawMode === 'retopo' && isRetopoObj) || (viewMode === 'WIREFRAME' && isSelected)) {
+            const totalVerts = obj.vertices?.length || 0;
+            const isDenseMesh = totalVerts > 2500;
 
-            if (obj.vertices) {
-              obj.vertices.forEach((v, i) => {
-                const off = obj.vertexOffsets?.[i] || [0,0,0];
-                logicalVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
-                const isSel = isSelected && selectedSet.has(i);
-                if (isSel) {
-                  // Vibrant selected vertex color (amber-gold / orange)
-                  vertColors.push(0.96, 0.62, 0.04);
-                } else if (viewMode === 'FACES_VERTICES' && !isSelected) {
-                  // Cyan for unselected in faces+vertices mode
-                  vertColors.push(0.02, 0.71, 0.83);
-                } else {
-                  // Clean crisp white with dark border
-                  vertColors.push(1.0, 1.0, 1.0);
-                }
-              });
-            }
+            // En modo Toda la Malla Visible (ALL_WIREFRAME), omitir círculos para dejar la estructura limpia
+            const shouldSkipDots = viewMode === 'ALL_WIREFRAME' && editMode !== 'VERTEX';
 
-            pointGeo.setAttribute('position', new THREE.Float32BufferAttribute(logicalVerts, 3));
-            pointGeo.setAttribute('color', new THREE.Float32BufferAttribute(vertColors, 3));
-            pointGeo.computeBoundingSphere();
+            if (!shouldSkipDots) {
+              const pointGeo = new THREE.BufferGeometry();
+              const logicalVerts: number[] = [];
+              const vertColors: number[] = [];
+              const selectedSet = new Set(selectedVertexIndices);
 
-            // Main screen-space 2D points (crisp 7.5px circular dot with outline, fixed screen size, zero GPU waste)
-            const pts = new THREE.Points(pointGeo, SHARED_POINTS_MAT);
-            pts.position.copy(initialPos);
-            pts.rotation.copy(initialRot);
-            pts.scale.copy(initialScale);
-            pts.updateMatrixWorld(true);
-            pts.renderOrder = 40;
-            group.add(pts);
+              if (obj.vertices) {
+                obj.vertices.forEach((v, i) => {
+                  const off = obj.vertexOffsets?.[i] || [0,0,0];
+                  logicalVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
+                  const isSel = isSelected && selectedSet.has(i);
+                  if (isSel) {
+                    // Vibrant selected vertex color (amber-gold / orange)
+                    vertColors.push(0.96, 0.62, 0.04);
+                  } else if (viewMode === 'FACES_VERTICES' && !isSelected) {
+                    // Cyan for unselected in faces+vertices mode
+                    vertColors.push(0.02, 0.71, 0.83);
+                  } else {
+                    // Clean crisp white with dark border
+                    vertColors.push(1.0, 1.0, 1.0);
+                  }
+                });
+              }
 
-            if (isSelected || editMode === 'VERTEX') {
-              vertexPointsRef.current = pts;
+              pointGeo.setAttribute('position', new THREE.Float32BufferAttribute(logicalVerts, 3));
+              pointGeo.setAttribute('color', new THREE.Float32BufferAttribute(vertColors, 3));
+              pointGeo.computeBoundingSphere();
+
+              // En Malla normal (WIREFRAME), mostrar siempre los círculos clásicos pedidos por el usuario
+              const pointsMat = (viewMode === 'WIREFRAME' || !isDenseMesh)
+                ? SHARED_POINTS_MAT
+                : new THREE.PointsMaterial({
+                    size: totalVerts > 20000 ? 1.5 : 2.5,
+                    sizeAttenuation: false,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.7,
+                    depthTest: true,
+                  });
+
+              const pts = new THREE.Points(pointGeo, pointsMat);
+              pts.position.copy(initialPos);
+              pts.rotation.copy(initialRot);
+              pts.scale.copy(initialScale);
+              pts.updateMatrixWorld(true);
+              pts.renderOrder = 40;
+              group.add(pts);
+
+              if (isSelected || editMode === 'VERTEX') {
+                vertexPointsRef.current = pts;
+              }
             }
 
             // If any vertices are selected, render a prominent highlighted cross/dot layer
@@ -3356,7 +3410,6 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             }
 
             // Invisible picking proxies for fast click & drag detection (only for meshes with <= 300 vertices)
-            const totalVerts = obj.vertices?.length || 0;
             if (totalVerts <= 300) {
               for (let i = 0; i < totalVerts; i++) {
                 const pickDot = new THREE.Mesh(SHARED_PICK_GEO, SHARED_PICK_MAT);
