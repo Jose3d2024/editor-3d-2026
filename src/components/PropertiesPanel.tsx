@@ -2145,6 +2145,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     flipObjectNormals,
     updateObject,
     fillHolesObject,
+    repairObjectFacesAndHoles,
     capSelectedFacesObject,
     repairObject,
     weldObject,
@@ -2693,35 +2694,55 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             <p className="text-[8px] text-zinc-400 leading-tight">
               Reorganiza toda la malla en cuadriláteros limpios con bucles de bordes continuos para animación y rigging sin perder volumen.
             </p>
-            <div className="grid grid-cols-2 gap-1 pt-0.5">
+            <div className="grid grid-cols-3 gap-1 pt-0.5">
+              <button
+                type="button"
+                onClick={() => retopologizeObject(obj.id, { mode: 'QUAD_DOMINANT', targetRatio: 0.50 })}
+                className="py-1.5 bg-gradient-to-r from-cyan-700 to-blue-700 hover:from-cyan-600 hover:to-blue-600 rounded text-[8.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                title="Preserva la silueta con máxima densidad (50% de caras) fiel a la superficie de referencia"
+              >
+                <Zap size={10} className="text-amber-400" />
+                Silueta (50%)
+              </button>
               <button
                 type="button"
                 onClick={() => retopologizeObject(obj.id, { mode: 'QUAD_DOMINANT', targetRatio: 0.25 })}
-                className="py-1.5 bg-gradient-to-r from-fuchsia-700 to-indigo-700 hover:from-fuchsia-600 hover:to-indigo-600 rounded text-[9px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                className="py-1.5 bg-gradient-to-r from-fuchsia-700 to-indigo-700 hover:from-fuchsia-600 hover:to-indigo-600 rounded text-[8.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
                 title="Genera topología limpia con cuadriláteros dominantes al 25% del recuento original"
               >
-                <Layers size={11} />
-                Quads Dominantes (25%)
+                <Layers size={10} />
+                Quads (25%)
               </button>
               <button
                 type="button"
                 onClick={() => retopologizeObject(obj.id, { mode: 'PURE_QUADS', targetRatio: 0.25 })}
-                className="py-1.5 bg-gradient-to-r from-indigo-700 to-violet-700 hover:from-indigo-600 hover:to-violet-600 rounded text-[9px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                className="py-1.5 bg-gradient-to-r from-indigo-700 to-violet-700 hover:from-indigo-600 hover:to-violet-600 rounded text-[8.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
                 title="Genera topología 100% de cuadriláteros puros (Catmull-Clark Flow)"
               >
-                <Sparkles size={11} />
-                100% Quads (Puros)
+                <Sparkles size={10} />
+                100% Quads
               </button>
             </div>
-            <button
-              type="button"
-              onClick={() => convertMeshToQuadsObject(obj.id, { preserveCreases: false })}
-              className="w-full py-1 bg-zinc-900 hover:bg-zinc-800 text-cyan-300 border border-cyan-500/30 rounded text-[8.5px] font-bold transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
-              title="Convierte pares de caras triangulares coplanares en caras cuadriláteras (Quads) eliminando las aristas diagonales"
-            >
-              <Box size={10} className="text-cyan-400" />
-              <span>Convertir Malla a Quads (Disolver Diagonales)</span>
-            </button>
+            <div className="grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                onClick={() => convertMeshToQuadsObject(obj.id, { preserveCreases: false })}
+                className="py-1 bg-zinc-900 hover:bg-zinc-800 text-cyan-300 border border-cyan-500/30 rounded text-[8px] font-bold transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                title="Convierte pares de caras triangulares coplanares en caras cuadriláteras (Quads) eliminando las aristas diagonales"
+              >
+                <Box size={10} className="text-cyan-400" />
+                <span>Disolver Diagonales</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => repairObjectFacesAndHoles(obj.id)}
+                className="py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-600/40 rounded text-[8px] font-bold transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                title="Sella todos los huecos abiertos y soluciona cualquier error de falta de caras u orientación invertida"
+              >
+                <Sparkles size={10} className="text-emerald-400" />
+                <span>Sellar y Reparar Caras</span>
+              </button>
+            </div>
           </div>
 
           {/* 4. Snapping: Ajuste a Caras (Imán de Retopología) */}

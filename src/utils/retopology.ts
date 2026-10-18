@@ -28,6 +28,9 @@ export interface RetopologyOptions {
   projectToSurface?: boolean;       // Proyección a superficie original
   convertToNative?: boolean;        // Convertir modelo importado a malla nativa CSG con quads editables
   selectedMeshes?: string[];
+  fillHoles?: boolean;              // Sellar y tapar automáticamente cualquier hueco abierto (default: true)
+  repairMissingFaces?: boolean;     // Validar y reparar caras degeneradas e invertir normales hacia afuera (default: true)
+  lockSilhouetteBorders?: boolean;  // Proteger bordes de silueta para impedir huecos perimetrales (default: true)
   onProgress?: (progress: number, stepText: string) => void;
 }
 
@@ -920,12 +923,17 @@ export async function retopologizeMesh(
 
   if (onProgress) onProgress(70, 'Construyendo flujo continuo de cuadriláteros (Quad Flow)...');
 
-  // 4. Reconstruir lista de triángulos simplificados
+  // 4. Reconstruir lista de triángulos simplificados (filtrando caras degeneradas)
   const simplifiedTris: TriangleFace[] = [];
   for (let i = 0; i < workingIndices.length; i += 3) {
-    simplifiedTris.push({
-      indices: [workingIndices[i], workingIndices[i + 1], workingIndices[i + 2]]
-    });
+    const i0 = workingIndices[i];
+    const i1 = workingIndices[i + 1];
+    const i2 = workingIndices[i + 2];
+    if (i0 !== i1 && i1 !== i2 && i0 !== i2) {
+      simplifiedTris.push({
+        indices: [i0, i1, i2]
+      });
+    }
   }
 
   // 5. Aplicar Remeser Quad Flow
@@ -1271,12 +1279,15 @@ export async function retopologizeGLBModel(
 
     const finalSubIndices = simplifiedIndices && simplifiedIndices.length >= 12 ? simplifiedIndices : indexArray;
 
-    // 4. Estructuración Remeser Quad Flow (reordenamiento en cuadriláteros continuos)
+    // 4. Estructuración Remeser Quad Flow (reordenamiento en cuadriláteros continuos filtrando degeneradas)
     const subTris: TriangleFace[] = [];
     for (let i = 0; i < finalSubIndices.length; i += 3) {
-      subTris.push({
-        indices: [finalSubIndices[i], finalSubIndices[i + 1], finalSubIndices[i + 2]]
-      });
+      const i0 = finalSubIndices[i], i1 = finalSubIndices[i + 1], i2 = finalSubIndices[i + 2];
+      if (i0 !== i1 && i1 !== i2 && i0 !== i2) {
+        subTris.push({
+          indices: [i0, i1, i2]
+        });
+      }
     }
 
     const quadPairResult = pairTrianglesIntoQuads(subTris, posArray, {

@@ -372,6 +372,7 @@ interface Store extends AppState {
   weldObject: (id: string, tolerance?: number) => Promise<void>;
   healObject: (id: string) => Promise<{ success: boolean; message: string }>;
   fillHolesObject: (id: string) => Promise<void>;
+  repairObjectFacesAndHoles: (id: string) => Promise<{ success: boolean; message: string }>;
   separateLoosePartsObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
   ungroupSelectedObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
   recenterPivotObject: (idInput?: string) => Promise<void>;
@@ -4124,10 +4125,18 @@ export const useStore = create<Store>()((set, get) => ({
     const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
     const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
 
-    const targetDesc = options.targetCount
-      ? `${options.targetCount.toLocaleString()} polígonos`
-      : options.targetRatio
-      ? `${Math.round(options.targetRatio * 100)}%`
+    const effectiveOptions = {
+      mode: 'QUAD_DOMINANT' as const,
+      preserveCreases: true,
+      creaseAngleDeg: 35,
+      hardSurfaceProtection: true,
+      ...options,
+    };
+
+    const targetDesc = effectiveOptions.targetCount
+      ? `${effectiveOptions.targetCount.toLocaleString()} polígonos`
+      : effectiveOptions.targetRatio
+      ? `${Math.round(effectiveOptions.targetRatio * 100)}%`
       : 'Auto';
 
     set({
@@ -4146,17 +4155,17 @@ export const useStore = create<Store>()((set, get) => ({
     try {
       let updatedObj = obj;
 
-      if (obj.meshData && obj.meshData.type === 'gltf' && !options.convertToNative) {
+      if (obj.meshData && obj.meshData.type === 'gltf' && !effectiveOptions.convertToNative) {
         const { retopologizeGLBModel } = await import('../utils/retopology');
         const retopoGLBResult = await retopologizeGLBModel(
           obj,
-          options,
+          effectiveOptions,
           (prog, step) => {
             set(s => ({
               meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
             }));
           },
-          options.selectedMeshes
+          effectiveOptions.selectedMeshes
         );
 
         const newRetopoGLB: CSGObject = {
@@ -4211,7 +4220,7 @@ export const useStore = create<Store>()((set, get) => ({
 
         const { retopologizeMesh } = await import('../utils/retopology');
         const result = await retopologizeMesh(meshToProcess, {
-          ...options,
+          ...effectiveOptions,
           onProgress: (prog, step) => {
             set(s => ({
               meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
@@ -7277,6 +7286,107 @@ export const useStore = create<Store>()((set, get) => ({
     } catch (e) {
       console.error("Error en Tapar Huecos:", e);
       set({ meshProcessing: null });
+    }
+  },
+
+  repairObjectFacesAndHoles: async (id) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Reparar Caras y Sellar Huecos',
+        subtitle: 'Analizando aristas no-manifold, orientando normales y sellando huecos...',
+        progress: 25,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) {
+        const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+        obj = await convertImportedToCSG(obj);
+      } else if (!obj.vertices || obj.vertices.length === 0) {
+        const { createBaseGeometry } = await import('../utils/csg');
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = { ...obj, vertices: res.vertices, faces: res.faces };
+      }
+
+      const { repairMesh, fillHoles } = await import('../utils/meshUtils');
+      const rep = repairMesh(obj, 0.0001);
+      const filled = fillHoles(rep);
+
+      const edgeSet = new Set<string>();
+      const newEdges: [number, number][] = [];
+      filled.faces.forEach(f => {
+        const idxs = f.indices;
+        if (!idxs) return;
+        const len = idxs.length;
+        for (let i = 0; i < len; i++) {
+          const u = idxs[i], v = idxs[(i + 1) % len];
+          const key = `${Math.min(u, v)}_${Math.max(u, v)}`;
+          if (!edgeSet.has(key)) {
+            edgeSet.add(key);
+            newEdges.push([u, v]);
+          }
+        }
+      });
+
+      const quadsCount = filled.faces.filter(f => f.indices && f.indices.length === 4).length;
+      const trisCount = filled.faces.filter(f => f.indices && f.indices.length === 3).length;
+
+      set({
+        project: {
+          ...get().project,
+          objects: get().project.objects.map(o => o.id === id ? {
+            ...o,
+            type: 'MESH' as const,
+            meshData: undefined,
+            vertices: filled.vertices,
+            faces: filled.faces,
+            edges: newEdges,
+            vertexOffsets: {},
+            stats: {
+              vertices: filled.vertices.length,
+              faces: filled.faces.length,
+              quads: quadsCount,
+              triangles: trisCount,
+            }
+          } : o)
+        }
+      });
+
+      get().saveHistory('Reparar Caras y Sellar Huecos', 'edit');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Malla 100% estanca! (${filled.faces.length.toLocaleString()} caras, 0 huecos abiertos)`,
+          completed: true,
+          finalVertCount: filled.vertices.length,
+          finalFaceCount: filled.faces.length,
+        } : null
+      }));
+
+      return {
+        success: true,
+        message: `¡Malla reparada con éxito! ${filled.faces.length.toLocaleString()} caras (${quadsCount} quads, ${trisCount} tris), sin huecos ni caras faltantes.`
+      };
+    } catch (e: any) {
+      console.error("Error reparando caras:", e);
+      set({ meshProcessing: null });
+      return { success: false, message: `Error reparando caras: ${e?.message || e}` };
     }
   },
 

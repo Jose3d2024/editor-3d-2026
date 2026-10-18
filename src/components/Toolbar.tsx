@@ -1759,6 +1759,45 @@ export const Toolbar: React.FC = () => {
                             </div>
                           </button>
                         </div>
+                        {/* Opciones Adicionales de Retopo y Reparación */}
+                        <div className="mt-2 grid grid-cols-2 gap-1.5 p-1.5 bg-zinc-900/80 rounded-lg border border-cyan-900/40">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setShowMainCreate(false);
+                              const state = useStore.getState();
+                              const targetId = state.selectedObjectId || state.project.objects[0]?.id;
+                              if (targetId) {
+                                await state.retopologizeObject(targetId, {
+                                  mode: 'QUAD_DOMINANT',
+                                  targetRatio: 0.50,
+                                  adaptiveCurvature: true,
+                                  preserveCreases: true,
+                                  hardSurfaceProtection: true,
+                                });
+                              }
+                            }}
+                            className="py-1 px-1.5 bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800/60 rounded text-[9px] font-bold text-center transition-all cursor-pointer"
+                            title="Conserva la silueta con máxima densidad (50% caras) fiel al modelo de referencia"
+                          >
+                            Silueta Fiel (50%)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setShowMainCreate(false);
+                              const state = useStore.getState();
+                              const targetId = state.selectedObjectId || state.project.objects[0]?.id;
+                              if (targetId) {
+                                await state.repairObjectFacesAndHoles(targetId);
+                              }
+                            }}
+                            className="py-1 px-1.5 bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-800/60 rounded text-[9px] font-bold text-center transition-all cursor-pointer"
+                            title="Opcional: Sellar huecos abiertos si un modelo tiene agujeros accidentales"
+                          >
+                            🔧 Sellar Huecos (Opcional)
+                          </button>
+                        </div>
                         <div className="mt-2">
                           <button onClick={()=>{setDrawMode(drawMode==='rect'?null:'rect');setShowMainCreate(false);}} 
                             className={`w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border transition-all cursor-pointer ${drawMode==='rect'?'bg-indigo-600 border-indigo-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'}`}>
