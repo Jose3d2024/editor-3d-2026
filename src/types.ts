@@ -839,4 +839,8 @@ export interface AppState {
   openMaterialStudio: (materialId?: string | null) => void;
   closeMaterialStudio: () => void;
   setMaterialStudioMaterialId: (id: string) => void;
+
+  activePropertyTab: 'PROPERTIES' | 'HISTORIAL' | 'EDIT_MESH' | 'MATERIALS' | 'SCENE' | 'CONFIG';
+  setActivePropertyTab: (tab: 'PROPERTIES' | 'HISTORIAL' | 'EDIT_MESH' | 'MATERIALS' | 'SCENE' | 'CONFIG') => void;
 }
+

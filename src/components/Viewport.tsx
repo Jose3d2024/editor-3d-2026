@@ -2433,7 +2433,8 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
           dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
           loader.setDRACOLoader(dracoLoader);
           loader.setMeshoptDecoder(MeshoptDecoder);
-          loader.load(obj.meshData.data, (gltf) => {
+
+          const processLoadedGLTF = (gltf: any) => {
             if (isEffectCancelled) return;
             const currentObj = useStore.getState().project.objects.find(o => o.id === obj.id);
             if (!currentObj || currentObj.meshData?.data !== cacheKey) return;
@@ -2492,10 +2493,151 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
 
             group.add(clonedScene);
             meshesRef.current.set(obj.id, clonedScene);
-          }, undefined, (error) => {
-            console.error(`❌ Error loading GLTF for object ${obj.id}:`, error);
-          });
-          return;
+          };
+
+          const handleGLTFFallback = (error: any) => {
+            console.warn(`[Viewport] Aviso: no se pudo cargar recurso GLTF directo para ${obj.id}:`, error);
+
+            // 1. Si el objeto dispone de vértices y caras nativas, renderizar malla nativa
+            if (obj.vertices && obj.vertices.length > 0 && obj.faces && obj.faces.length > 0) {
+              try {
+                const geo = new THREE.BufferGeometry();
+                const posArr: number[] = [];
+                const idxArr: number[] = [];
+                obj.vertices.forEach(v => posArr.push(v[0], v[1], v[2]));
+                obj.faces.forEach(f => {
+                  const idxs = f.indices;
+                  if (!idxs) return;
+                  if (idxs.length === 3) {
+                    idxArr.push(idxs[0], idxs[1], idxs[2]);
+                  } else if (idxs.length === 4) {
+                    idxArr.push(idxs[0], idxs[1], idxs[2], idxs[0], idxs[2], idxs[3]);
+                  }
+                });
+                geo.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+                geo.setIndex(idxArr);
+                geo.computeVertexNormals();
+
+                const mat = new THREE.MeshStandardMaterial({
+                  color: obj.color || '#06b6d4',
+                  roughness: 0.45,
+                  metalness: 0.1,
+                  side: THREE.DoubleSide
+                });
+                const nativeMesh = new THREE.Mesh(geo, mat);
+                nativeMesh.position.copy(initialPos);
+                nativeMesh.rotation.copy(initialRot);
+                nativeMesh.scale.copy(initialScale);
+                nativeMesh.updateMatrixWorld(true);
+                nativeMesh.userData.id = obj.id;
+
+                const wireGeo = new THREE.WireframeGeometry(geo);
+                const wireMat = new THREE.LineBasicMaterial({ color: 0x0891b2, transparent: true, opacity: 0.85, depthTest: false });
+                const wireLine = new THREE.LineSegments(wireGeo, wireMat);
+                wireLine.renderOrder = 30;
+                wireLine.userData.isWireOverlay = true;
+                nativeMesh.add(wireLine);
+
+                group.add(nativeMesh);
+                meshesRef.current.set(obj.id, nativeMesh);
+                return;
+              } catch (eNative) {
+                console.warn(`[Viewport] Error al construir malla nativa de reemplazo:`, eNative);
+              }
+            }
+
+            // 2. Si no tiene geometría nativa (p.ej. objeto residual previo con blob expirado),
+            // recuperar geometría a partir del objeto fuente / de referencia en la escena
+            const allObjs = useStore.getState().project.objects;
+            const sourceCandidate = allObjs.find(o =>
+              o.id !== obj.id && (
+                (obj.name && o.name && obj.name.includes(o.name)) ||
+                (o.name && obj.name && o.name.includes(obj.name.replace('Retopología - ', ''))) ||
+                o.meshData ||
+                (o.vertices && o.vertices.length > 0)
+              )
+            );
+
+            if (sourceCandidate) {
+              const sourceMesh = meshesRef.current.get(sourceCandidate.id);
+              if (sourceMesh) {
+                const recovered = SkeletonUtils.clone(sourceMesh);
+                recovered.position.copy(initialPos);
+                recovered.rotation.copy(initialRot);
+                recovered.scale.copy(initialScale);
+                recovered.updateMatrixWorld(true);
+                recovered.userData.id = obj.id;
+                applyViewModeToImported(recovered);
+                group.add(recovered);
+                meshesRef.current.set(obj.id, recovered);
+                return;
+              }
+
+              // Si la malla fuente aún se está cargando de forma asíncrona, cargar desde sus datos de origen
+              if (sourceCandidate.meshData?.data) {
+                const srcData = sourceCandidate.meshData.data;
+                const onSourceReady = (gltfSrc: any) => {
+                  if (isEffectCancelled) return;
+                  const cloned = SkeletonUtils.clone(gltfSrc.scene);
+                  cloned.position.copy(initialPos);
+                  cloned.rotation.copy(initialRot);
+                  cloned.scale.copy(initialScale);
+                  cloned.updateMatrixWorld(true);
+                  cloned.userData.id = obj.id;
+                  applyViewModeToImported(cloned);
+                  group.add(cloned);
+                  meshesRef.current.set(obj.id, cloned);
+                };
+
+                if (srcData.startsWith('data:') || (srcData.length > 200 && !srcData.startsWith('http') && !srcData.startsWith('blob:'))) {
+                  try {
+                    const b64 = srcData.includes(',') ? srcData.split(',')[1] : srcData;
+                    const bin = atob(b64);
+                    const bytes = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                    loader.parse(bytes.buffer, '', onSourceReady, () => {});
+                    return;
+                  } catch (_) {}
+                } else {
+                  loader.load(srcData, onSourceReady, undefined, () => {});
+                  return;
+                }
+              }
+            }
+
+            const fallbackGroup = new THREE.Group();
+            fallbackGroup.userData.id = obj.id;
+            group.add(fallbackGroup);
+            meshesRef.current.set(obj.id, fallbackGroup);
+          };
+
+          const rawData = obj.meshData.data;
+          // Decodificación directa de base64 Data URL sin peticiones fetch de red (evita restricciones de iframe)
+          if (rawData && (rawData.startsWith('data:') || (rawData.length > 200 && !rawData.startsWith('http') && !rawData.startsWith('blob:')))) {
+            try {
+              const b64 = rawData.includes(',') ? rawData.split(',')[1] : rawData;
+              const bin = atob(b64);
+              const bytes = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) {
+                bytes[i] = bin.charCodeAt(i);
+              }
+              loader.parse(bytes.buffer, '', processLoadedGLTF, handleGLTFFallback);
+              return;
+            } catch (decErr) {
+              console.warn(`[Viewport] Error al decodificar base64 GLTF:`, decErr);
+              handleGLTFFallback(decErr);
+              return;
+            }
+          } else {
+            // Si el objeto dispone de geometría nativa completa y la URL es un blob o no está disponible,
+            // renderizar directamente de forma síncrona sin disparar peticiones fetch que fallen en el iframe
+            if (obj.vertices && obj.vertices.length > 0 && obj.faces && obj.faces.length > 0) {
+              handleGLTFFallback(new Error('Rendering directly from native vertices'));
+              return;
+            }
+            loader.load(rawData, processLoadedGLTF, undefined, handleGLTFFallback);
+            return;
+          }
         } else if (obj.meshData.type === 'stl') {
           new STLLoader().load(obj.meshData.data, (geometry) => {
             if (isEffectCancelled) return;
@@ -2517,6 +2659,12 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             
             group.add(clonedMesh);
             meshesRef.current.set(obj.id, clonedMesh);
+          }, undefined, (error) => {
+            console.warn(`[Viewport] Aviso: no se pudo cargar recurso STL para objeto ${obj.id}:`, error);
+            const fallbackGroup = new THREE.Group();
+            fallbackGroup.userData.id = obj.id;
+            group.add(fallbackGroup);
+            meshesRef.current.set(obj.id, fallbackGroup);
           });
           return;
         } else if (obj.meshData.type === 'obj') {
@@ -2537,6 +2685,12 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
             
             group.add(clonedObject);
             meshesRef.current.set(obj.id, clonedObject);
+          }, undefined, (error) => {
+            console.warn(`[Viewport] Aviso: no se pudo cargar recurso OBJ para objeto ${obj.id}:`, error);
+            const fallbackGroup = new THREE.Group();
+            fallbackGroup.userData.id = obj.id;
+            group.add(fallbackGroup);
+            meshesRef.current.set(obj.id, fallbackGroup);
           });
           return;
         }
@@ -3091,7 +3245,7 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
       edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
 
       const isWireOnly = obj.isWireframeOnly || !obj.faces || obj.faces.length === 0 || isAllWire;
-      const shouldShowEdges = isWireOnly || isWireMode || viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'FACES_VERTICES' || isBlueprintActive || isRetopoActive || editMode !== 'OBJECT' || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
+      const shouldShowEdges = isWireOnly || isWireMode || viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'FACES_VERTICES' || isBlueprintActive || isRetopoActive || isRetopoObj || editMode !== 'OBJECT' || (!!obj.showWireframe && viewMode !== 'SOLID' && viewMode !== 'TEXTURED');
 
       const wireColor = isBlueprintActive
         ? 0x00f0ff
@@ -3105,13 +3259,13 @@ export const Viewport: React.FC<ViewportProps> = React.memo(({ type: initialType
                         ? (isSelected ? 0x60a5fa : 0x4ade80)
                         : (viewMode === 'TEXTURED_WIREFRAME'
                             ? (isSelected ? 0x38bdf8 : 0x0284c7)
-                            : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444))))));
+                            : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : (isRetopoObj ? (isSelected ? 0xffffff : 0x0891b2) : 0x444444)))))));
 
       const edgeLines = new THREE.LineSegments(
         edgeGeo,
         new THREE.LineBasicMaterial({
           color: wireColor,
-          opacity: isBlueprintActive ? 0.95 : (isRetopoActive ? (isRetopoObj ? 1.0 : 0.8) : (isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'TEXTURED_WIREFRAME' ? 0.85 : (viewMode === 'FACES_VERTICES' ? 0.85 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0)))))),
+          opacity: isBlueprintActive ? 0.95 : (isRetopoActive ? (isRetopoObj ? 1.0 : 0.8) : (isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'TEXTURED_WIREFRAME' ? 0.85 : (viewMode === 'FACES_VERTICES' ? 0.85 : (isRetopoObj ? 0.95 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0))))))),
           transparent: true,
           visible: shouldShowEdges,
           depthTest: !isWireOnly && !isAllWire, 

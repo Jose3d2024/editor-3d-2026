@@ -775,6 +775,10 @@ export const useStore = create<Store>()((set, get) => ({
   openFaceSnapDemoModal: () => set({ isFaceSnapDemoModalOpen: true }),
   closeFaceSnapDemoModal: () => set({ isFaceSnapDemoModalOpen: false }),
 
+  // ── Active Property Tab ──
+  activePropertyTab: 'PROPERTIES',
+  setActivePropertyTab: (tab) => set({ activePropertyTab: tab }),
+
   resetProject: () => {
     const freshProject: Project = JSON.parse(JSON.stringify(DEFAULT_PROJECT));
     set({
@@ -4153,60 +4157,98 @@ export const useStore = create<Store>()((set, get) => ({
     await new Promise(r => setTimeout(r, 40));
 
     try {
-      let updatedObj = obj;
+      let retopoSuccess = false;
 
+      // Para modelos GLB (tanto originales como retopologías previas con texturas y materiales):
       if (obj.meshData && obj.meshData.type === 'gltf' && !effectiveOptions.convertToNative) {
-        const { retopologizeGLBModel } = await import('../utils/retopology');
-        const retopoGLBResult = await retopologizeGLBModel(
-          obj,
-          effectiveOptions,
-          (prog, step) => {
+        try {
+          const { retopologizeGLBModel } = await import('../utils/retopology');
+          const retopoGLBResult = await retopologizeGLBModel(
+            obj,
+            effectiveOptions,
+            (prog, step) => {
+              set(s => ({
+                meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
+              }));
+            },
+            effectiveOptions.selectedMeshes
+          );
+
+          if (retopoGLBResult && (retopoGLBResult.meshData?.data || (retopoGLBResult.vertices && retopoGLBResult.vertices.length > 0))) {
+            const cleanBaseName = obj.name.replace(/^(?:Retopología(?:\s*\d+)?\s*-\s*)+/i, '');
+            const retopoMatch = obj.name.match(/^Retopología\s*(\d+)?\s*-\s*/i);
+            const nextRetopoNum = retopoMatch && retopoMatch[1] ? parseInt(retopoMatch[1], 10) + 1 : (obj.name.startsWith('Retopología') ? 2 : 1);
+            const newRetopoMeshName = nextRetopoNum > 1
+              ? `Retopología ${nextRetopoNum} - ${cleanBaseName}`
+              : `Retopología - ${cleanBaseName}`;
+
+            const offsetX = Math.abs(obj.transform.scale[0]) * 1.5 || 2.0;
+            const newRetopoGLB: CSGObject = {
+              ...retopoGLBResult,
+              id: `retopo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              name: newRetopoMeshName,
+              type: 'MESH',
+              color: '#06b6d4',
+              opacity: 0.95,
+              isRetopoMesh: true,
+              visible: true,
+              smoothShading: true,
+              transform: {
+                position: [
+                  obj.transform.position[0] + offsetX,
+                  obj.transform.position[1],
+                  obj.transform.position[2]
+                ],
+                rotation: [...obj.transform.rotation],
+                scale: [...obj.transform.scale]
+              }
+            };
+
+            set({
+              project: {
+                ...get().project,
+                objects: [...get().project.objects, newRetopoGLB]
+              },
+              selectedObjectId: newRetopoGLB.id,
+              selectedObjectIds: [newRetopoGLB.id]
+            });
+
+            const finalVerts = newRetopoGLB.stats?.vertices ?? 0;
+            const finalFaces = newRetopoGLB.stats?.faces ?? 0;
+            const quadsCount = newRetopoGLB.stats?.quads ?? 0;
+            const polyCount = finalFaces.toLocaleString();
+            get().saveHistory(`Crear ${newRetopoGLB.name} (${polyCount} caras)`, 'retopo');
+
             set(s => ({
-              meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
+              meshProcessing: s.meshProcessing ? {
+                ...s.meshProcessing,
+                progress: 100,
+                subtitle: `¡Malla de retopología creada! Conservando figura de referencia '${obj.name}' y nueva malla '${newRetopoGLB.name}' (${polyCount} caras · ${quadsCount.toLocaleString()} quads)`,
+                completed: true,
+                finalVertCount: finalVerts,
+                finalFaceCount: finalFaces,
+              } : null
             }));
-          },
-          effectiveOptions.selectedMeshes
-        );
 
-        const newRetopoGLB: CSGObject = {
-          ...retopoGLBResult,
-          id: `retopo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          name: `Retopología - ${obj.name}`,
-        };
+            setTimeout(() => {
+              set(s => (s.meshProcessing?.completed ? { meshProcessing: null } : {}));
+            }, 1200);
 
-        set({
-          project: {
-            ...get().project,
-            objects: [...get().project.objects, newRetopoGLB]
-          },
-          selectedObjectId: newRetopoGLB.id,
-          selectedObjectIds: [newRetopoGLB.id]
-        });
+            retopoSuccess = true;
+            return;
+          }
+        } catch (glbErr) {
+          console.warn('[Remeser] Aviso: retopologizeGLBModel falló, usando respaldo nativo:', glbErr);
+        }
+      }
 
-        const finalVerts = newRetopoGLB.stats?.vertices ?? 0;
-        const finalFaces = newRetopoGLB.stats?.faces ?? 0;
-        const quadsCount = newRetopoGLB.stats?.quads ?? 0;
-        const reduction = initialFaces > 0 ? Math.round(((initialFaces - finalFaces) / initialFaces) * 100) : 0;
-        const polyCount = finalFaces.toLocaleString();
-        get().saveHistory(`Crear ${newRetopoGLB.name} (${polyCount} caras)`, 'retopo');
-
-        set(s => ({
-          meshProcessing: s.meshProcessing ? {
-            ...s.meshProcessing,
-            progress: 100,
-            subtitle: `¡Malla de retopología creada! Conservando figura de referencia '${obj.name}' y nueva malla '${newRetopoGLB.name}' (${polyCount} caras · ${quadsCount.toLocaleString()} quads)`,
-            completed: true,
-            finalVertCount: finalVerts,
-            finalFaceCount: finalFaces,
-          } : null
-        }));
-        return;
-      } else {
+      if (!retopoSuccess) {
         let meshToProcess = obj;
-        if (obj.meshData) {
+        // Solo convertir si NO tenemos ya los vértices y caras disponibles en el objeto
+        if ((!meshToProcess.vertices || meshToProcess.vertices.length === 0) && obj.meshData) {
           const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
           meshToProcess = await convertImportedToCSG(obj);
-        } else if (!obj.vertices || obj.vertices.length === 0) {
+        } else if (!meshToProcess.vertices || meshToProcess.vertices.length === 0) {
           const { createBaseGeometry } = await import('../utils/csg');
           const { fromThreeGeometry } = await import('../utils/modifiers');
           const geo = createBaseGeometry(obj);
@@ -4245,12 +4287,29 @@ export const useStore = create<Store>()((set, get) => ({
           }
         });
 
+        const cleanBaseName = obj.name.replace(/^(?:Retopología(?:\s*\d+)?\s*-\s*)+/i, '');
+        const retopoMatch = obj.name.match(/^Retopología\s*(\d+)?\s*-\s*/i);
+        const nextRetopoNum = retopoMatch && retopoMatch[1] ? parseInt(retopoMatch[1], 10) + 1 : (obj.name.startsWith('Retopología') ? 2 : 1);
+        const newRetopoMeshName = nextRetopoNum > 1
+          ? `Retopología ${nextRetopoNum} - ${cleanBaseName}`
+          : `Retopología - ${cleanBaseName}`;
+
+        const offsetX = Math.abs(obj.transform.scale[0]) * 1.5 || 2.0;
+
         const newRetopoMesh: CSGObject = {
           id: `retopo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          name: `Retopología - ${obj.name}`,
+          name: newRetopoMeshName,
           type: 'MESH',
           operation: 'ADD',
-          transform: { ...obj.transform },
+          transform: {
+            position: [
+              obj.transform.position[0] + offsetX,
+              obj.transform.position[1],
+              obj.transform.position[2]
+            ],
+            rotation: [...obj.transform.rotation],
+            scale: [...obj.transform.scale]
+          },
           parameters: {
             ...(obj.parameters || {}),
             creaseAngleDeg: options.creaseAngleDeg || 35
@@ -4260,7 +4319,7 @@ export const useStore = create<Store>()((set, get) => ({
           edges: retopoEdges,
           vertexOffsets: {},
           color: '#06b6d4',
-          opacity: 0.92,
+          opacity: 0.95,
           isRetopoMesh: true,
           visible: true,
           smoothShading: true,
@@ -4283,7 +4342,6 @@ export const useStore = create<Store>()((set, get) => ({
           selectedObjectIds: [newRetopoMesh.id]
         });
 
-        const modeStr = options.mode === 'PURE_QUADS' ? '100% Quads' : (options.mode === 'QUAD_DOMINANT' ? 'Quads Dominante' : (options.mode === 'ISOTROPIC_TRI' ? 'Isótropo' : 'Retopología'));
         const polyCount = result.stats.finalFaces.toLocaleString();
         get().saveHistory(`Crear ${newRetopoMesh.name} (${polyCount} caras)`, 'retopo');
 
@@ -4297,7 +4355,10 @@ export const useStore = create<Store>()((set, get) => ({
             finalFaceCount: result.stats.finalFaces,
           } : null
         }));
-        return;
+
+        setTimeout(() => {
+          set(s => (s.meshProcessing?.completed ? { meshProcessing: null } : {}));
+        }, 1200);
       }
     } catch (e) {
       console.error('Error en Remeser:', e);

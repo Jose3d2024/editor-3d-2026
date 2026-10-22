@@ -4,6 +4,7 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { MeshoptSimplifier as Meshopt, MeshoptDecoder } from 'meshoptimizer';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { MeshBVH } from 'three-mesh-bvh';
 import { CSGObject, MeshFace, V3 } from '../types';
 import { computeSmoothNormalsByPosition } from './meshUtils';
 
@@ -346,12 +347,14 @@ export function pairTrianglesIntoQuads(
 
     // Si existen coordenadas UV, NUNCA invertir la diagonal porque rompería la continuidad de la textura
     if (!uvs && canFlipDiag && vDist(p0, p2) <= vDist(p1, p3) * 1.15) {
-      // Triangulación por diagonal q0-q2
+      // Triangulación por diagonal q0-q2 (oppA - oppB)
       orderedIndices.push(q0, q1, q2, q0, q2, q3);
       quads.push([q0, q1, q2, q3]);
     } else {
-      // Preservar la diagonal original q1-q3 rotando el quad para alineación canónica
-      orderedIndices.push(q0, q1, q3, q2, q3, q1);
+      // Preservar la diagonal original q1-q3 (vStart - vEnd)
+      // Viewport triangula un quad [a, b, c, d] cortando por la diagonal a - c (a, b, c) y (a, c, d).
+      // Para que el corte sea a lo largo de (vStart - vEnd), 'a' y 'c' deben ser vStart y vEnd:
+      orderedIndices.push(q1, q2, q3, q1, q3, q0);
       quads.push([q1, q2, q3, q0]);
     }
   }
@@ -409,13 +412,9 @@ export function pairTrianglesIntoQuads(
 
     used[idxA] = 1;
     used[idxB] = 1;
-    quads.push([oppA, vStart, oppB, vEnd]);
-    if (uvs) {
-      // Mantiene el orden antihorario canónico para evitar caras invertidas
-      orderedIndices.push(oppA, vStart, vEnd, oppB, vStart, vEnd);
-    } else {
-      orderedIndices.push(oppA, vStart, oppB, oppA, oppB, vEnd);
-    }
+    // Mantener la diagonal original vStart - vEnd sin forzar diagonales cruzadas
+    quads.push([vStart, oppB, vEnd, oppA]);
+    orderedIndices.push(vStart, oppB, vEnd, vStart, vEnd, oppA);
   });
 
   for (let i = 0; i < tris.length; i++) {
@@ -434,7 +433,8 @@ export function pairTrianglesIntoQuads(
 // ─────────────────────────────────────────────────────────────────────────────
 function compactGeometry(
   sourceGeo: THREE.BufferGeometry,
-  newIndices: Uint32Array | number[]
+  newIndices: Uint32Array | number[],
+  explicitGroups?: { start: number; count: number; materialIndex?: number }[]
 ): THREE.BufferGeometry {
   const indexArr = newIndices instanceof Uint32Array ? newIndices : new Uint32Array(newIndices);
   const totalIndices = indexArr.length;
@@ -483,6 +483,13 @@ function compactGeometry(
     remappedIndices[i] = oldToNew[indexArr[i]];
   }
   compactedGeo.setIndex(new THREE.BufferAttribute(remappedIndices, 1));
+
+  // Preservar grupos de materiales estrictos (evita que caras se pinten con texturas incorrectas o transparentes)
+  if (explicitGroups && explicitGroups.length > 0) {
+    compactedGeo.groups = explicitGroups.map(g => ({ ...g }));
+  } else if (sourceGeo.groups && sourceGeo.groups.length === 1) {
+    compactedGeo.addGroup(0, totalIndices, sourceGeo.groups[0].materialIndex || 0);
+  }
 
   // Solo recalcular normales si la geometría original no disponía de normales válidas
   if (!sourceGeo.attributes.normal) {
@@ -996,6 +1003,30 @@ export async function retopologizeMesh(
     finalVerts = snapPlanarClusters(finalVerts, compactedFaces, 4.0, 0.01);
   }
 
+  // 7. Proyección y ajuste a la superficie original mediante BVH (Zero-Deviation: 100% fidelidad a la referencia)
+  if (options.projectToSurface !== false) {
+    try {
+      const bvhGeo = new THREE.BufferGeometry();
+      bvhGeo.setAttribute('position', new THREE.BufferAttribute(flatPositions, 3));
+      bvhGeo.setIndex(new THREE.BufferAttribute(new Uint32Array(initialIndices), 1));
+      const bvh = new MeshBVH(bvhGeo);
+      const tmpPt = new THREE.Vector3();
+      const hitTarget: any = {};
+      finalVerts = finalVerts.map(v => {
+        tmpPt.set(v[0], v[1], v[2]);
+        const res = bvh.closestPointToPoint(tmpPt, hitTarget);
+        const p = res?.point || hitTarget.point;
+        if (p && isFinite(p.x) && isFinite(p.y) && isFinite(p.z)) {
+          return [p.x, p.y, p.z] as V3;
+        }
+        return v;
+      });
+      bvhGeo.dispose();
+    } catch (eBVH) {
+      console.warn('BVH surface projection fallback:', eBVH);
+    }
+  }
+
   const finalFacesCount = compactedFaces.length;
   const reductionPct = initialFaceCount > 0
     ? Math.round(((initialFaceCount - finalFacesCount) / initialFaceCount) * 100)
@@ -1023,6 +1054,53 @@ export async function retopologizeMesh(
   };
 }
 
+/**
+ * Validador de simplificación geométrica:
+ * Garantiza que la malla resultante no haya colapsado en triángulos degenerados de área cero,
+ * agujas o aristas colineales (protección fundamental para cilindros, cañones y pistones).
+ */
+function isSimplificationValid(
+  simpIndices: Uint32Array | number[],
+  posArray: Float32Array | ArrayLike<number>,
+  initialFaceCount: number
+): boolean {
+  if (!simpIndices || simpIndices.length < 12) return false;
+  let nonDegenerateFaces = 0;
+  let nonZeroAreaFaces = 0;
+  const p0 = new THREE.Vector3();
+  const p1 = new THREE.Vector3();
+  const p2 = new THREE.Vector3();
+  const vA = new THREE.Vector3();
+  const vB = new THREE.Vector3();
+  const cross = new THREE.Vector3();
+
+  const len = simpIndices.length;
+  for (let i = 0; i < len; i += 3) {
+    const i0 = simpIndices[i];
+    const i1 = simpIndices[i + 1];
+    const i2 = simpIndices[i + 2];
+    if (i0 === i1 || i1 === i2 || i0 === i2) continue;
+    nonDegenerateFaces++;
+
+    p0.set(posArray[i0 * 3], posArray[i0 * 3 + 1], posArray[i0 * 3 + 2]);
+    p1.set(posArray[i1 * 3], posArray[i1 * 3 + 1], posArray[i1 * 3 + 2]);
+    p2.set(posArray[i2 * 3], posArray[i2 * 3 + 1], posArray[i2 * 3 + 2]);
+
+    vA.subVectors(p1, p0);
+    vB.subVectors(p2, p0);
+    cross.crossVectors(vA, vB);
+    if (cross.lengthSq() > 1e-12) {
+      nonZeroAreaFaces++;
+    }
+  }
+
+  if (nonZeroAreaFaces < 4) return false;
+  if (nonZeroAreaFaces < nonDegenerateFaces * 0.70) return false;
+  if (initialFaceCount <= 1200 && nonZeroAreaFaces < initialFaceCount * 0.12) return false;
+
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Retopologizador Remeser de Modelos GLB / GLTF (Zero-Loss UVs y Materiales)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1046,9 +1124,21 @@ export async function retopologizeGLBModel(
   loader.setDRACOLoader(dracoLoader);
   loader.setMeshoptDecoder(MeshoptDecoder);
 
-  const gltf = await new Promise<any>((resolve, reject) =>
-    loader.load(obj.meshData!.data, resolve, undefined, reject)
-  );
+  let gltf: any;
+  const rawData = obj.meshData!.data;
+  if (rawData && (rawData.startsWith('data:') || (rawData.length > 200 && !rawData.startsWith('http') && !rawData.startsWith('blob:')))) {
+    try {
+      const b64 = rawData.includes(',') ? rawData.split(',')[1] : rawData;
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      gltf = await new Promise<any>((resolve, reject) => loader.parse(bytes.buffer, '', resolve, reject));
+    } catch (parseE) {
+      gltf = await new Promise<any>((resolve, reject) => loader.load(rawData, resolve, undefined, reject));
+    }
+  } else {
+    gltf = await new Promise<any>((resolve, reject) => loader.load(rawData, resolve, undefined, reject));
+  }
 
   const scene = gltf.scene;
 
@@ -1138,146 +1228,284 @@ export async function retopologizeGLBModel(
     const indexArray = indexAttr.array instanceof Uint32Array ? indexAttr.array : new Uint32Array(indexAttr.array);
 
     const initialSubTris = indexArray.length / 3;
-    if (initialSubTris <= 4) {
+
+    // Protección 1: Sub-mallas mecánicas pequeñas (cañones, pistones, manguitos, pernos, antenas)
+    // En modelos mecánicos, submallas con <= 280 triángulos ya tienen la densidad mínima
+    // para representar cilindros cerrados o bielas. Reducirlas un 75% destruye su geometría.
+    const hardSurface = options.hardSurfaceProtection !== false;
+    const minSubTrisThreshold = hardSurface ? 280 : 160;
+
+    if (initialSubTris <= minSubTrisThreshold) {
+      totalResultFaces += initialSubTris;
+      totalResultVerts += posAttr.count;
+      continue; // Preservar 100% intacta la submalla pequeña
+    }
+
+    // Análisis de elongación y silueta tubular (cañones de blasters, vástagos de pistones, cilindros de patas)
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox || new THREE.Box3();
+    const bSize = new THREE.Vector3();
+    bbox.getSize(bSize);
+    const sortedDims = [bSize.x, bSize.y, bSize.z].sort((a, b) => b - a);
+    const maxDim = sortedDims[0];
+    const midDim = sortedDims[1];
+    const minDim = sortedDims[2];
+
+    const isThinOrElongated = maxDim > 1e-4 && (
+      (minDim > 1e-6 && maxDim / Math.max(minDim, 1e-5) > 3.0) ||
+      (midDim > 1e-6 && maxDim / Math.max(midDim, 1e-5) > 2.2) ||
+      minDim < 1e-5
+    );
+
+    // Protección 2: Piezas alargadas/cilíndricas con <= 500 triángulos:
+    // Nunca decimar tubos, cañones o pistones de patas que tengan <= 500 tris para evitar colapso radial a área cero
+    if (isThinOrElongated && initialSubTris <= 500) {
       totalResultFaces += initialSubTris;
       totalResultVerts += posAttr.count;
       continue;
     }
 
-    // Objetivo proporcional para esta sub-malla
-    const targetSubTris = Math.max(4, Math.floor(initialSubTris * globalRatio));
-    const targetIndicesCount = targetSubTris * 3;
+    // Objetivo adaptativo proporcional para esta sub-malla
+    let subRatio = globalRatio;
+    if (isThinOrElongated) {
+      subRatio = Math.max(0.70, globalRatio);
+    } else if (initialSubTris <= 800) {
+      subRatio = Math.max(0.60, globalRatio);
+    } else if (initialSubTris <= 2000) {
+      subRatio = Math.max(0.40, globalRatio);
+    }
+
+    const targetSubTris = Math.max(120, Math.floor(initialSubTris * subRatio));
+    const targetIndicesCount = Math.floor(targetSubTris * 3);
 
     if (onProgress) {
       const pct = Math.round(25 + (m / meshesToProcess.length) * 50);
-      await onProgress(pct, `Remeser en ${mesh.name || `Parte ${m + 1}`}: preservando texturas y geometría...`);
+      await onProgress(pct, `Remeser en ${mesh.name || `Parte ${m + 1}`}: preservando geometría y silueta...`);
     }
 
-    let simplifiedIndices: Uint32Array | null = null;
+    let finalSubIndices: Uint32Array;
+    let explicitGroups: { start: number; count: number; materialIndex?: number }[] | undefined = undefined;
 
-    if (hasUV) {
-      // Tier 1: Simplificación con protección multi-atributo de textura UV
-      const uvArray = uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array);
-      let scale = 1.0;
-      try {
-        scale = Meshopt.getScale(posArray, 3);
-      } catch (e) {
-        scale = 1.0;
-      }
-      // Ponderación de UV adaptada a la escala de la geometría para evitar bloquear la reducción
-      const uvWeight = Math.max(0.1, Math.min(2.0, scale * 0.25));
-      const uvWeights = [uvWeight, uvWeight];
+    // A. Mallas Multi-Material (geometry.groups.length > 1):
+    // Cada ranura de material (ej: casco exterior beige vs motor interior gris oscuro)
+    // se procesa de forma independiente. Esto impide al 100% que vértices del casco exterior
+    // colapsen hacia el interior (lo que abría agujeros en la parte trasera) y evita que caras exteriores
+    // se pinten con la textura del motor o se vuelvan invisibles.
+    if (geometry.groups && geometry.groups.length > 1) {
+      const combinedIndices: number[] = [];
+      explicitGroups = [];
 
-      if (preserveCreases) {
-        const attempts = [
-          { err: 0.03, flags: ['LockBorder'] as any },
-          { err: 0.08, flags: ['LockBorder'] as any },
-          { err: 0.20, flags: ['LockBorder'] as any },
-        ];
+      for (const grp of geometry.groups) {
+        const grpIndices = indexArray.subarray(grp.start, grp.start + grp.count);
+        const grpSubTris = grpIndices.length / 3;
 
-        for (const att of attempts) {
-          try {
-            const res = Meshopt.simplifyWithAttributes(
-              indexArray,
-              posArray,
-              3,
-              uvArray,
-              2,
-              uvWeights,
-              null,
-              targetIndicesCount,
-              att.err,
-              att.flags
-            );
-            const simp = Array.isArray(res) ? res[0] : res;
-            if (simp && simp.length >= 12 && simp.length < indexArray.length) {
-              simplifiedIndices = simp;
-              if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
-            }
-          } catch (eSimp) {}
+        // Submallas pequeñas dentro del grupo se conservan 100% íntegras
+        if (grpSubTris <= minSubTrisThreshold) {
+          const startIdx = combinedIndices.length;
+          for (let k = 0; k < grpIndices.length; k++) combinedIndices.push(grpIndices[k]);
+          explicitGroups.push({
+            start: startIdx,
+            count: grpIndices.length,
+            materialIndex: grp.materialIndex ?? 0
+          });
+          continue;
         }
-      }
 
-      // Tier 2: Si LockBorder limitó la reducción en costuras UV o bordes de paneles abiertos (ej: alas o paneles de naves),
-      // simplificar con protección de UV sin LockBorder. Meshopt sigue protegiendo la textura con el error de atributos.
-      if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.18) {
-        const attemptsNoLock = [
-          { err: 0.03, flags: [] as any },
-          { err: 0.08, flags: [] as any },
-          { err: 0.20, flags: [] as any },
-          { err: 0.40, flags: [] as any },
-          { err: 0.65, flags: [] as any },
-        ];
-        for (const att of attemptsNoLock) {
-          try {
-            const res = Meshopt.simplifyWithAttributes(
-              indexArray,
-              posArray,
-              3,
-              uvArray,
-              2,
-              uvWeights,
-              null,
-              targetIndicesCount,
-              att.err,
-              att.flags
-            );
-            const simp = Array.isArray(res) ? res[0] : res;
-            if (simp && simp.length >= 12 && simp.length < (simplifiedIndices ? simplifiedIndices.length : indexArray.length)) {
-              simplifiedIndices = simp;
-              if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
-            }
-          } catch (eSimp) {}
-        }
-      }
-    }
+        const grpTargetTris = Math.max(80, Math.floor(grpSubTris * subRatio));
+        const grpTargetIndices = grpTargetTris * 3;
 
-    // Tier 3: Simplificación posicional pura si los atributos UV bloquearon la reducción o el modelo no tiene UVs
-    if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.25) {
-      const attemptsPos = [
-        { err: 0.05, flags: preserveCreases ? ['LockBorder'] : [] as any },
-        { err: 0.15, flags: [] as any },
-        { err: 0.35, flags: [] as any },
-        { err: 0.60, flags: [] as any },
-      ];
-      for (const att of attemptsPos) {
-        try {
-          const res = Meshopt.simplify(
-            indexArray,
-            posArray,
-            3,
-            targetIndicesCount,
-            att.err,
-            att.flags as any
-          );
-          const simp = Array.isArray(res) ? res[0] : res;
-          if (simp && simp.length >= 12 && simp.length < (simplifiedIndices ? simplifiedIndices.length : indexArray.length)) {
-            simplifiedIndices = simp;
-            if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+        let grpSimplified: Uint32Array | null = null;
+        if (hasUV) {
+          const uvArray = uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array);
+          const uvWeights = [0.06, 0.06];
+          const attempts = [
+            { err: 0.02, flags: ['LockBorder'] as any },
+            { err: 0.05, flags: ['LockBorder'] as any },
+            { err: 0.08, flags: ['LockBorder'] as any },
+          ];
+          for (const att of attempts) {
+            try {
+              const res = Meshopt.simplifyWithAttributes(
+                grpIndices,
+                posArray,
+                3,
+                uvArray,
+                2,
+                uvWeights,
+                null,
+                grpTargetIndices,
+                att.err,
+                att.flags
+              );
+              const simp = Array.isArray(res) ? res[0] : res;
+              if (simp && isSimplificationValid(simp, posArray, grpSubTris)) {
+                if (!grpSimplified || simp.length < grpSimplified.length) {
+                  grpSimplified = simp;
+                }
+                if (grpSimplified.length <= grpTargetIndices * 1.15) break;
+              }
+            } catch (eSimp) {}
           }
-        } catch (eSimp) {}
-      }
-    }
-
-    // Tier 4: Garantía absoluta de reducción: simplifySloppy SOLO si no hay creases exigentes
-    if (!preserveCreases && (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.20)) {
-      try {
-        const res = Meshopt.simplifySloppy(
-          indexArray,
-          posArray,
-          3,
-          null,
-          targetIndicesCount,
-          0.5
-        );
-        const simp = Array.isArray(res) ? res[0] : res;
-        if (simp && simp.length >= 12 && simp.length < indexArray.length) {
-          simplifiedIndices = simp;
+        } else {
+          const attempts = [
+            { err: 0.025, flags: ['LockBorder'] as any },
+            { err: 0.050, flags: ['LockBorder'] as any },
+            { err: 0.080, flags: ['LockBorder'] as any },
+          ];
+          for (const att of attempts) {
+            try {
+              const res = Meshopt.simplify(
+                grpIndices,
+                posArray,
+                3,
+                grpTargetIndices,
+                att.err,
+                att.flags as any
+              );
+              const simp = Array.isArray(res) ? res[0] : res;
+              if (simp && isSimplificationValid(simp, posArray, grpSubTris)) {
+                if (!grpSimplified || simp.length < grpSimplified.length) {
+                  grpSimplified = simp;
+                }
+                if (grpSimplified.length <= grpTargetIndices * 1.15) break;
+              }
+            } catch (eSimp) {}
+          }
         }
-      } catch (eSloppy) {}
-    }
 
-    const finalSubIndices = simplifiedIndices && simplifiedIndices.length >= 12 ? simplifiedIndices : indexArray;
+        const validGrpIndices = grpSimplified || grpIndices;
+        const startIdx = combinedIndices.length;
+        for (let k = 0; k < validGrpIndices.length; k++) combinedIndices.push(validGrpIndices[k]);
+        explicitGroups.push({
+          start: startIdx,
+          count: validGrpIndices.length,
+          materialIndex: grp.materialIndex ?? 0
+        });
+      }
+
+      finalSubIndices = new Uint32Array(combinedIndices);
+    } else {
+      // B. Mallas Monomaterial / sin grupos:
+      let simplifiedIndices: Uint32Array | null = null;
+      const strictBorderLock = preserveCreases || hardSurface || isThinOrElongated;
+
+      if (hasUV) {
+        // En mallas con texturas UV, NUNCA eliminar atributos UV para evitar que el atlas de textura
+        // se desplace a partes oscuras o negras.
+        const uvArray = uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array);
+        const uvWeights = [0.06, 0.06];
+
+        const attemptsLock = isThinOrElongated
+          ? [
+              { err: 0.015, flags: ['LockBorder'] as any },
+              { err: 0.030, flags: ['LockBorder'] as any },
+            ]
+          : strictBorderLock
+          ? [
+              { err: 0.020, flags: ['LockBorder'] as any },
+              { err: 0.045, flags: ['LockBorder'] as any },
+              { err: 0.075, flags: ['LockBorder'] as any },
+            ]
+          : [
+              { err: 0.03, flags: ['LockBorder'] as any },
+              { err: 0.06, flags: ['LockBorder'] as any },
+              { err: 0.09, flags: ['LockBorder'] as any },
+            ];
+
+        for (const att of attemptsLock) {
+          try {
+            const res = Meshopt.simplifyWithAttributes(
+              indexArray,
+              posArray,
+              3,
+              uvArray,
+              2,
+              uvWeights,
+              null,
+              targetIndicesCount,
+              att.err,
+              att.flags
+            );
+            const simp = Array.isArray(res) ? res[0] : res;
+            if (simp && isSimplificationValid(simp, posArray, initialSubTris)) {
+              if (!simplifiedIndices || simp.length < simplifiedIndices.length) {
+                simplifiedIndices = simp;
+              }
+              if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+            }
+          } catch (eSimp) {}
+        }
+
+        // Si LockBorder limitó la reducción en paneles grandes (no tubos), permitir relajar LockBorder
+        // manteniendo la protección estricta de UVs (evita rotura de texturas sin bloquear bordes)
+        if (!isThinOrElongated && (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.25)) {
+          const attemptsNoLock = [
+            { err: 0.035, flags: [] as any },
+            { err: 0.065, flags: [] as any },
+          ];
+          for (const att of attemptsNoLock) {
+            try {
+              const res = Meshopt.simplifyWithAttributes(
+                indexArray,
+                posArray,
+                3,
+                uvArray,
+                2,
+                uvWeights,
+                null,
+                targetIndicesCount,
+                att.err,
+                att.flags
+              );
+              const simp = Array.isArray(res) ? res[0] : res;
+              if (simp && isSimplificationValid(simp, posArray, initialSubTris)) {
+                if (!simplifiedIndices || simp.length < simplifiedIndices.length) {
+                  simplifiedIndices = simp;
+                }
+                if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+              }
+            } catch (eSimp) {}
+          }
+        }
+      } else {
+        // Modelo puramente posicional sin texturas UV
+        const attemptsPos = strictBorderLock
+          ? [
+              { err: 0.025, flags: ['LockBorder'] as any },
+              { err: 0.050, flags: ['LockBorder'] as any },
+              { err: 0.075, flags: ['LockBorder'] as any },
+            ]
+          : [
+              { err: 0.04, flags: ['LockBorder'] as any },
+              { err: 0.08, flags: [] as any },
+              { err: 0.15, flags: [] as any },
+            ];
+
+        for (const att of attemptsPos) {
+          try {
+            const res = Meshopt.simplify(
+              indexArray,
+              posArray,
+              3,
+              targetIndicesCount,
+              att.err,
+              att.flags as any
+            );
+            const simp = Array.isArray(res) ? res[0] : res;
+            if (simp && isSimplificationValid(simp, posArray, initialSubTris)) {
+              if (!simplifiedIndices || simp.length < simplifiedIndices.length) {
+                simplifiedIndices = simp;
+              }
+              if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+            }
+          } catch (eSimp) {}
+        }
+      }
+
+      finalSubIndices = (simplifiedIndices && isSimplificationValid(simplifiedIndices, posArray, initialSubTris))
+        ? simplifiedIndices
+        : indexArray;
+    }
 
     // 4. Estructuración Remeser Quad Flow (reordenamiento en cuadriláteros continuos filtrando degeneradas)
     const subTris: TriangleFace[] = [];
@@ -1299,8 +1527,9 @@ export async function retopologizeGLBModel(
     totalResultQuads += quadPairResult.quads.length;
 
     // 5. Recompactación de la geometría (Zero-Loss de Atributos)
-    const indicesToUse = (hasUV && mode !== 'PURE_QUADS') ? finalSubIndices : quadPairResult.orderedIndices;
-    const newGeometry = compactGeometry(geometry, indicesToUse);
+    // Preservar la triangulación exacta y el orden CCW de caras para que ninguna cara sufra culling invertido
+    const indicesToUse = (mode === 'PURE_QUADS') ? quadPairResult.orderedIndices : finalSubIndices;
+    const newGeometry = compactGeometry(geometry, indicesToUse, explicitGroups);
 
     // Preservación estricta de normales sin sobreasignación de objetos Vector3
     if (!geometry.attributes.normal) {
@@ -1352,14 +1581,31 @@ export async function retopologizeGLBModel(
   });
 
   const blob = new Blob([glbBuffer], { type: 'model/gltf-binary' });
-  const url = URL.createObjectURL(blob);
+  // Usar base64 Data URL para persistencia permanente sin fallas de URL de blob expiradas
+  let url = '';
+  try {
+    url = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch (_e) {
+    url = URL.createObjectURL(blob);
+  }
 
-  // 7. Reconstruir lista de sub-mallas y estadísticas
+  // 7. Reconstruir lista de sub-mallas, estadísticas y extraer geometría nativa de respaldo
   const meshesList: { id: string; name: string; vertices: number; faces: number }[] = [];
   let idx = 0;
   let accurateTotalVerts = 0;
   let accurateTotalFaces = 0;
 
+  const extractedVerts: V3[] = [];
+  const extractedFaces: MeshFace[] = [];
+  const edgeSet = new Set<string>();
+  const extractedEdges: [number, number][] = [];
+
+  scene.updateMatrixWorld(true);
   scene.traverse((child: any) => {
     if (child.isMesh && child.geometry) {
       const v = child.geometry.attributes.position ? child.geometry.attributes.position.count : 0;
@@ -1372,6 +1618,34 @@ export async function retopologizeGLBModel(
         vertices: Math.floor(v),
         faces: Math.floor(f)
       });
+
+      const geo = child.geometry;
+      const posAttr = geo.attributes.position;
+      if (posAttr) {
+        const baseV = extractedVerts.length;
+        const tempV = new THREE.Vector3();
+        for (let i = 0; i < posAttr.count; i++) {
+          tempV.fromBufferAttribute(posAttr, i).applyMatrix4(child.matrixWorld);
+          extractedVerts.push([tempV.x, tempV.y, tempV.z]);
+        }
+        if (geo.index) {
+          const idxArr = geo.index.array;
+          for (let i = 0; i < idxArr.length; i += 3) {
+            const i0 = baseV + idxArr[i];
+            const i1 = baseV + idxArr[i + 1];
+            const i2 = baseV + idxArr[i + 2];
+            extractedFaces.push({ indices: [i0, i1, i2] });
+            const triEdges: [number, number][] = [[i0, i1], [i1, i2], [i2, i0]];
+            for (const [e0, e1] of triEdges) {
+              const k = `${Math.min(e0, e1)}_${Math.max(e0, e1)}`;
+              if (!edgeSet.has(k)) {
+                edgeSet.add(k);
+                extractedEdges.push([e0, e1]);
+              }
+            }
+          }
+        }
+      }
     }
   });
 
@@ -1381,6 +1655,11 @@ export async function retopologizeGLBModel(
 
   return {
     ...obj,
+    type: 'MESH',
+    vertices: extractedVerts,
+    faces: extractedFaces,
+    edges: extractedEdges,
+    isRetopoMesh: true,
     meshData: {
       ...obj.meshData,
       data: url,

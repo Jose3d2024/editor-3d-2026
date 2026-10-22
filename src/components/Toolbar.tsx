@@ -9,7 +9,7 @@ import {
   ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid, LayoutGrid, Check, SlidersHorizontal,
   GripVertical, GripHorizontal, Pin, PinOff, AlignStartVertical, Plus, X, Sparkles,
   Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split,
-  Keyboard, Cloud, Wind, Flame, Waves, Bone, Camera, ShieldCheck
+  Keyboard, Cloud, Wind, Flame, Waves, Bone, Camera, ShieldCheck, Activity, Sliders
 } from 'lucide-react';
 import { downloadViewportSnapshot } from '../utils/viewportCapture';
 import { ConfirmModal } from './ConfirmModal';
@@ -1750,7 +1750,7 @@ export const Toolbar: React.FC = () => {
                               });
                             }
                           }} 
-                            className="flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer bg-cyan-950/60 border-cyan-700/60 text-cyan-200 hover:bg-cyan-900/60 shadow-sm"
+                            className="flex items-center gap-2.5 p-2.5 rounded-lg border transition-all cursor-pointer bg-cyan-950/60 border-cyan-700/60 text-cyan-200 hover:bg-cyan-900/60 shadow-sm relative"
                             title="Remallado automático adaptativo por silueta y contorno (elimina puntos planos innecesarios)">
                             <Zap size={18} className="text-amber-400"/>
                             <div className="text-left">

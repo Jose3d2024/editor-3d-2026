@@ -7999,10 +7999,11 @@ export const PropertiesPanel: React.FC = () => {
     duplicateObject, saveHistory, selectObject, toggleObjectSelection,
     moveObjectUp, moveObjectDown, selectedLightId, selectedCameraId,
     removeLight, removeCamera, selectLight, selectCamera, updateLight, editMode, setEditMode,
-    drawMode
+    drawMode, activePropertyTab, setActivePropertyTab
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'HISTORIAL' | 'EDIT_MESH' | 'MATERIALS' | 'SCENE' | 'CONFIG'>('PROPERTIES');
+  const activeTab = activePropertyTab || 'PROPERTIES';
+  const setActiveTab = setActivePropertyTab;
   const [showShortcutsModal, setShowShortcutsModal] = useState(false);
   const [shortcutsFloating, setShortcutsFloating] = useState(false);
   const obj = project.objects.find(o => o.id === selectedObjectId);
@@ -8015,7 +8016,7 @@ export const PropertiesPanel: React.FC = () => {
     } else if (editMode !== 'OBJECT') {
       setActiveTab('EDIT_MESH');
     }
-  }, [selectedObjectId, selectedLightId, selectedCameraId, editMode]);
+  }, [selectedObjectId, selectedLightId, selectedCameraId, editMode, activePropertyTab]);
 
   const handleExport = async (format: 'GLB' | 'GLTF' | 'OBJ') => {
     const objectsToExport = (selectedObjectIds && selectedObjectIds.length > 0)
